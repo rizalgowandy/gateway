@@ -4,9 +4,10 @@ import (
 	"context"
 	"testing"
 
-	"github.com/mitchellh/mapstructure"
+	"github.com/go-viper/mapstructure/v2"
 	"github.com/nautilus/graphql"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 func schemaTestLoadQuery(query string, target interface{}, variables map[string]interface{}) error {
@@ -74,6 +75,7 @@ func schemaTestLoadQuery(query string, target interface{}, variables map[string]
 }
 
 func TestSchemaIntrospection_query(t *testing.T) {
+	t.Parallel()
 	// a place to hold the response of the query
 	result := &graphql.IntrospectionQueryResult{}
 
@@ -86,7 +88,7 @@ func TestSchemaIntrospection_query(t *testing.T) {
 
 	// there are a few things we need to look for:
 	// 		Schema.queryType.name, Schema.mutationType, Schema.subscriptionType, Query.allUsers, and User.firstName
-	assert.Equal(t, "Query", result.Schema.QueryType.Name)
+	assert.Equal(t, typeNameQuery, result.Schema.QueryType.Name)
 	assert.Nil(t, result.Schema.MutationType)
 	assert.Nil(t, result.Schema.SubscriptionType)
 
@@ -97,13 +99,14 @@ func TestSchemaIntrospection_query(t *testing.T) {
 	var fooInput graphql.IntrospectionQueryFullType
 
 	for _, schemaType := range result.Schema.Types {
-		if schemaType.Name == "Query" {
+		switch schemaType.Name {
+		case typeNameQuery:
 			queryType = schemaType
-		} else if schemaType.Name == "User" {
+		case "User":
 			userType = schemaType
-		} else if schemaType.Name == "EnumValue" {
+		case "EnumValue":
 			enumType = schemaType
-		} else if schemaType.Name == "FooInput" {
+		case "FooInput":
 			fooInput = schemaType
 		}
 	}
@@ -182,7 +185,27 @@ func TestSchemaIntrospection_query(t *testing.T) {
 	assert.Equal(t, "A", directive.Name)
 }
 
+func TestSchemaIntrospection_deterministicOrder(t *testing.T) {
+	t.Parallel()
+	introspectSchema := func() graphql.IntrospectionQueryResult {
+		var result graphql.IntrospectionQueryResult
+		err := schemaTestLoadQuery(graphql.IntrospectionQuery, &result, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Log(result)
+		return result
+	}
+
+	first := introspectSchema()
+	const maxAttempts = 10
+	for i := 0; i < maxAttempts; i++ {
+		require.Equal(t, first, introspectSchema())
+	}
+}
+
 func TestSchemaIntrospection_lookUpType(t *testing.T) {
+	t.Parallel()
 	// a place to hold the response of the query
 	result := &struct {
 		Type struct {
@@ -209,6 +232,7 @@ func TestSchemaIntrospection_lookUpType(t *testing.T) {
 }
 
 func TestSchemaIntrospection_missingType(t *testing.T) {
+	t.Parallel()
 	// a place to hold the response of the query
 	result := &struct {
 		Type *struct {
@@ -234,9 +258,52 @@ func TestSchemaIntrospection_missingType(t *testing.T) {
 	assert.Nil(t, result.Type)
 }
 
+func TestSchemaIntrospection_missingQueryDocument(t *testing.T) {
+	t.Parallel()
+	schema, err := graphql.LoadSchema("")
+	require.NoError(t, err)
+	gateway, err := New([]*graphql.RemoteSchema{
+		{Schema: schema, URL: "url1"},
+	})
+	require.NoError(t, err)
+
+	t.Run("valid query", func(t *testing.T) {
+		t.Parallel()
+		var result interface{}
+		err := gateway.Query(context.Background(), &graphql.QueryInput{
+			Query: `
+			{
+				__type(name: "Query") {
+					name
+				}
+			}
+		`,
+			QueryDocument: nil,
+		}, &result)
+		assert.NoError(t, err)
+		name := "Query"
+		assert.Equal(t, map[string]interface{}{
+			"__type": map[string]interface{}{
+				"name": &name,
+			},
+		}, result)
+	})
+
+	t.Run("invalid query", func(t *testing.T) {
+		t.Parallel()
+		var result interface{}
+		err := gateway.Query(context.Background(), &graphql.QueryInput{
+			Query:         "garbage",
+			QueryDocument: nil,
+		}, &result)
+		assert.EqualError(t, err, "input:1: Unexpected Name \"garbage\"\n")
+	})
+}
+
 func TestSchema_resolveNodeInlineID(t *testing.T) {
+	t.Parallel()
 	type Result struct {
-		Node struct {
+		Node *struct {
 			ID string `json:"id"`
 		} `json:"node"`
 	}
@@ -254,19 +321,16 @@ func TestSchema_resolveNodeInlineID(t *testing.T) {
 
 	// a place to hold the response of the query
 	err := schemaTestLoadQuery(query, result, map[string]interface{}{})
-	if err != nil {
-		t.Error(err.Error())
-		return
-	}
-
-	assert.Equal(t, &Result{Node: struct {
+	assert.NoError(t, err)
+	assert.Equal(t, &Result{Node: &struct {
 		ID string `json:"id"`
 	}{ID: "my-id"}}, result)
 }
 
 func TestSchema_resolveNodeIDFromArg(t *testing.T) {
+	t.Parallel()
 	type Result struct {
-		Node struct {
+		Node *struct {
 			ID string `json:"id"`
 		} `json:"node"`
 	}
@@ -286,12 +350,132 @@ func TestSchema_resolveNodeIDFromArg(t *testing.T) {
 	err := schemaTestLoadQuery(query, result, map[string]interface{}{
 		"id": "my-id",
 	})
-	if err != nil {
-		t.Error(err.Error())
-		return
-	}
-
-	assert.Equal(t, &Result{Node: struct {
+	assert.NoError(t, err)
+	assert.Equal(t, &Result{Node: &struct {
 		ID string `json:"id"`
 	}{ID: "my-id"}}, result)
+}
+
+func TestSchema_resolveNodeWrongIDType(t *testing.T) {
+	t.Parallel()
+	type Node struct {
+		ID *string `json:"id"`
+	}
+	type Result struct {
+		Node Node `json:"node"`
+	}
+	var result Result
+
+	query := `
+		{
+			node(id: 123) {
+				id
+			}
+		}
+	`
+
+	err := schemaTestLoadQuery(query, result, map[string]interface{}{})
+	assert.Equal(t, graphql.ErrorList{
+		&graphql.Error{
+			Message: "invalid ID type: 123",
+			Path:    []interface{}{"node"},
+		},
+	}, err)
+	assert.Equal(t, Result{
+		Node: Node{ID: nil},
+	}, result)
+}
+
+func TestSchema_resolveNodeMissingIDArg(t *testing.T) {
+	t.Parallel()
+	type Node struct {
+		ID *string `json:"id"`
+	}
+	type Result struct {
+		Node Node `json:"node"`
+	}
+	var result Result
+
+	query := `
+		query ($id: ID!) {
+			node(id: $id) {
+				id
+			}
+		}
+	`
+	variables := map[string]interface{}{} // missing ID arg
+
+	err := schemaTestLoadQuery(query, result, variables)
+	assert.Equal(t, graphql.ErrorList{
+		&graphql.Error{
+			Message: "argument 'id' is required",
+			Path:    []interface{}{"node"},
+		},
+	}, err)
+	assert.Equal(t, Result{
+		Node: Node{ID: nil},
+	}, result)
+}
+
+func TestSchema_resolveNodeWrongIDArgType(t *testing.T) {
+	t.Parallel()
+	type Node struct {
+		ID *string `json:"id"`
+	}
+	type Result struct {
+		Node Node `json:"node"`
+	}
+	var result Result
+
+	query := `
+		query ($id: ID!) {
+			node(id: $id) {
+				id
+			}
+		}
+	`
+	variables := map[string]interface{}{
+		"id": 123,
+	}
+
+	err := schemaTestLoadQuery(query, result, variables)
+	assert.Equal(t, graphql.ErrorList{
+		&graphql.Error{
+			Message: "invalid ID type: 123",
+			Path:    []interface{}{"node"},
+		},
+	}, err)
+	assert.Equal(t, Result{
+		Node: Node{ID: nil},
+	}, result)
+}
+
+func TestSchema_resolveNodeWrongIDTypeWithAlias(t *testing.T) {
+	t.Parallel()
+	type Node struct {
+		ID *string `json:"id"`
+	}
+	type Result struct {
+		Node Node `json:"node"`
+	}
+	var result Result
+
+	query := `
+		{
+			myAlias: node(id: 123) {
+				id
+			}
+		}
+	`
+
+	err := schemaTestLoadQuery(query, result, map[string]interface{}{})
+	assert.Equal(t, graphql.ErrorList{
+		&graphql.Error{
+			Message: "invalid ID type: 123",
+			Path:    []interface{}{"myAlias"},
+		},
+	}, err)
+	assert.Equal(t, Result{
+		Node: Node{ID: nil},
+	}, result)
 }

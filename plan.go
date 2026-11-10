@@ -3,6 +3,8 @@ package gateway
 import (
 	"errors"
 	"fmt"
+	"maps"
+	"slices"
 	"sync"
 
 	"github.com/vektah/gqlparser/v2"
@@ -71,7 +73,6 @@ type QueryerFactory func(ctx *PlanningContext, url string) graphql.Queryer
 // Planner is meant to be embedded in other QueryPlanners to share configuration
 type Planner struct {
 	QueryerFactory *QueryerFactory
-	queryerCache   map[string]graphql.Queryer
 }
 
 // MinQueriesPlanner does the most basic level of query planning
@@ -82,7 +83,7 @@ type MinQueriesPlanner struct {
 
 // WithQueryerFactory returns a version of the planner with the factory set
 func (p *MinQueriesPlanner) WithQueryerFactory(factory *QueryerFactory) QueryPlanner {
-	p.Planner.QueryerFactory = factory
+	p.QueryerFactory = factory
 	return p
 }
 
@@ -143,7 +144,8 @@ func (p *MinQueriesPlanner) generatePlans(ctx *PlanningContext, query *ast.Query
 		plans = append(plans, plan)
 
 		// a channel to register new steps
-		stepCh := make(chan *newQueryPlanStepPayload, 50)
+		const maxConcurrentSteps = 50
+		stepCh := make(chan *newQueryPlanStepPayload, maxConcurrentSteps)
 
 		// a chan to get errors
 		errCh := make(chan error)
@@ -153,12 +155,16 @@ func (p *MinQueriesPlanner) generatePlans(ctx *PlanningContext, query *ast.Query
 		stepWg := &sync.WaitGroup{}
 
 		// get the type for the operation
-		operationType := "Query"
+		var operationType string
 		switch operation.Operation {
 		case ast.Mutation:
-			operationType = "Mutation"
+			operationType = typeNameMutation
 		case ast.Subscription:
-			operationType = "Subscription"
+			operationType = typeNameSubscription
+		case ast.Query:
+			operationType = typeNameQuery
+		default:
+			operationType = typeNameQuery
 		}
 
 		// we are garunteed at least one query
@@ -180,95 +186,89 @@ func (p *MinQueriesPlanner) generatePlans(ctx *PlanningContext, query *ast.Query
 		go func(newSteps chan *newQueryPlanStepPayload) {
 		SelectLoop:
 			// continuously drain the step channel
-			for {
-				select {
-				case payload, ok := <-newSteps:
-					if !ok {
-						return
-					}
-					step := &QueryPlanStep{
-						Queryer:             p.GetQueryer(ctx, payload.Location),
-						ParentType:          payload.ParentType,
-						SelectionSet:        ast.SelectionSet{},
-						InsertionPoint:      payload.InsertionPoint,
-						Variables:           Set{},
-						FragmentDefinitions: payload.Fragments,
-					}
-
-					// if there is a parent to this query
-					if payload.Parent != nil {
-						ctx.Gateway.logger.Debug(fmt.Sprintf("Adding step as dependency"))
-						// add the new step to the Then of the parent
-						payload.Parent.Then = append(payload.Parent.Then, step)
-					}
-					// if we don't yet have a root step
-					if plan.RootStep == nil {
-						// use this one
-						plan.RootStep = step
-					}
-
-					ctx.Gateway.logger.Debug(fmt.Sprintf(
-						"Encountered new step: \n"+
-							"\tParentType: %v \n"+
-							"\tInsertion Point: %v \n"+
-							"\tSelectionSet: \n%s",
-						step.ParentType,
-						payload.InsertionPoint,
-						graphql.FormatSelectionSet(payload.SelectionSet),
-					))
-
-					// we are going to start walking down the operations selection set and let
-					// the steps of the walk add any necessary selectedFields
-					newSelection, err := p.extractSelection(ctx, &extractSelectionConfig{
-						stepCh:         stepCh,
-						stepWg:         stepWg,
-						locations:      ctx.Locations,
-						parentLocation: payload.Location,
-						parentType:     step.ParentType,
-						selection:      payload.SelectionSet,
-						step:           step,
-						insertionPoint: payload.InsertionPoint,
-						plan:           payload.Plan,
-						wrapper:        payload.Wrapper,
-					})
-					if err != nil {
-						errCh <- err
-						continue SelectLoop
-					}
-
-					// if some of the fields are from the same location as the field on the operation
-					if newSelection != nil {
-						// we have a selection set from one of the root operation fields in the same location
-						// so add it to the query we are sending to the service
-						step.SelectionSet = newSelection
-					}
-
-					// now that we're done processing the step we need to preconstruct the query that we
-					// will be firing for this plan
-
-					// we need to grab the list of variable definitions
-					variableDefs := ast.VariableDefinitionList{}
-					// we need to grab the variable definitions and values for each variable in the step
-					for variable := range step.Variables {
-						// add the definition
-						variableDefs = append(variableDefs, plan.Operation.VariableDefinitions.ForName(variable))
-					}
-
-					// build up the query document
-					step.QueryDocument = plannerBuildQuery(ctx, plan.Operation.Name, step.ParentType, variableDefs, step.SelectionSet, step.FragmentDefinitions)
-
-					// we also need to turn the query into a string
-					queryString, err := graphql.PrintQuery(step.QueryDocument)
-					if err != nil {
-						errCh <- err
-						continue SelectLoop
-					}
-
-					step.QueryString = queryString
-
-					// we're done processing this step
-					stepWg.Done()
+			for payload := range newSteps {
+				step := &QueryPlanStep{
+					Queryer:             p.GetQueryer(ctx, payload.Location),
+					ParentType:          payload.ParentType,
+					SelectionSet:        ast.SelectionSet{},
+					InsertionPoint:      payload.InsertionPoint,
+					Variables:           Set{},
+					FragmentDefinitions: payload.Fragments,
 				}
+
+				// if there is a parent to this query
+				if payload.Parent != nil {
+					ctx.Gateway.logger.Debug("Adding step as dependency")
+					// add the new step to the Then of the parent
+					payload.Parent.Then = append(payload.Parent.Then, step)
+				}
+				// if we don't yet have a root step
+				if plan.RootStep == nil {
+					// use this one
+					plan.RootStep = step
+				}
+
+				ctx.Gateway.logger.Debug(fmt.Sprintf(
+					"Encountered new step: \n"+
+						"\tParentType: %v \n"+
+						"\tInsertion Point: %v \n"+
+						"\tSelectionSet: \n%s",
+					step.ParentType,
+					payload.InsertionPoint,
+					graphql.FormatSelectionSet(payload.SelectionSet),
+				))
+
+				// we are going to start walking down the operations selection set and let
+				// the steps of the walk add any necessary selectedFields
+				newSelection, err := p.extractSelection(ctx, &extractSelectionConfig{
+					stepCh:         stepCh,
+					stepWg:         stepWg,
+					locations:      ctx.Locations,
+					parentLocation: payload.Location,
+					parentType:     step.ParentType,
+					selection:      payload.SelectionSet,
+					step:           step,
+					insertionPoint: payload.InsertionPoint,
+					plan:           payload.Plan,
+					wrapper:        payload.Wrapper,
+				})
+				if err != nil {
+					errCh <- err
+					continue SelectLoop
+				}
+
+				// if some of the fields are from the same location as the field on the operation
+				if newSelection != nil {
+					// we have a selection set from one of the root operation fields in the same location
+					// so add it to the query we are sending to the service
+					step.SelectionSet = newSelection
+				}
+
+				// now that we're done processing the step we need to preconstruct the query that we
+				// will be firing for this plan
+
+				// we need to grab the list of variable definitions
+				variableDefs := ast.VariableDefinitionList{}
+				// we need to grab the variable definitions and values for each variable in the step
+				for variable := range step.Variables {
+					// add the definition
+					variableDefs = append(variableDefs, plan.Operation.VariableDefinitions.ForName(variable))
+				}
+
+				// build up the query document
+				step.QueryDocument = plannerBuildQuery(ctx, plan.Operation.Name, step.ParentType, variableDefs, step.SelectionSet, step.FragmentDefinitions)
+
+				// we also need to turn the query into a string
+				queryString, err := graphql.PrintQuery(step.QueryDocument)
+				if err != nil {
+					errCh <- err
+					continue SelectLoop
+				}
+
+				step.QueryString = queryString
+
+				// we're done processing this step
+				stepWg.Done()
 			}
 		}(stepCh)
 
@@ -307,7 +307,6 @@ func (p *MinQueriesPlanner) generatePlans(ctx *PlanningContext, query *ast.Query
 
 type extractSelectionConfig struct {
 	stepCh chan *newQueryPlanStepPayload
-	errCh  chan error
 	stepWg *sync.WaitGroup
 
 	locations      FieldURLMap
@@ -318,6 +317,121 @@ type extractSelectionConfig struct {
 	selection      ast.SelectionSet
 	insertionPoint []string
 	wrapper        ast.SelectionSet
+}
+
+// flattenSameUnionSelections flattens selection sets from inside a Union such that only member types or __typename are selected.
+// This removes same-Union-type selections by flattening them so the planner can split requests for services that may not contain the Union type.
+// It isn't quite recursive, just enough depth to merge the same-Union selection sets.
+//
+// For example querying this schema:
+//
+//	type Query {
+//		foo: Foo
+//	}
+//
+//	interface Node {
+//		id: ID!
+//	}
+//
+//	union Foo = Bar | Baz
+//
+//	type Bar implements Node {
+//		id: ID!
+//		bar: String
+//		biff: String
+//	}
+//
+//	type Baz implements Node {
+//		id: ID!
+//		baz: String
+//		boo: String
+//	}
+//
+// With this request:
+//
+//	query {
+//		foo {
+//			__typename
+//			... {
+//				... on Foo {
+//					... on Bar {
+//						bar
+//					}
+//				}
+//			}
+//			...fooFragment
+//	        ... on Baz {
+//	            boo
+//	        }
+//		}
+//	}
+//
+//	fragment fooFragment on Foo {
+//		... on Bar {
+//			biff
+//		}
+//		... on Baz {
+//			baz
+//		}
+//	}
+//
+// Results in this flattened plan (before splitting by service in [extractSelection]):
+//
+//	query {
+//		foo {
+//			__typename
+//			... on Bar {
+//				biff
+//				bar
+//			}
+//			... on Baz {
+//				baz
+//				boo
+//			}
+//		}
+//	}
+//
+// Notice how every selection set directly under field 'foo' with type 'Foo' has been collapsed, so the fragments are not nested with the same union type.
+//
+// __typename is the one field the spec allows directly on a union selection set (and clients like Apollo add
+// it automatically). It is keyed by the union itself, since every service that defines the union can answer it.
+func (p *MinQueriesPlanner) flattenSameUnionSelections(config *extractSelectionConfig, unionName string, selectionSet ast.SelectionSet) map[string]ast.SelectionSet {
+	typedSelectionSets := make(map[string]ast.SelectionSet)
+	for _, selection := range selectionSet {
+		switch selection := selection.(type) {
+		case *ast.Field:
+			typedSelectionSets[unionName] = append(typedSelectionSets[unionName], selection)
+		case *ast.InlineFragment:
+			sameUnionSelections := map[string]ast.SelectionSet{
+				selection.TypeCondition: selection.SelectionSet,
+			}
+			if selection.TypeCondition == "" || selection.TypeCondition == unionName {
+				sameUnionSelections = p.flattenSameUnionSelections(config, unionName, selection.SelectionSet)
+			}
+			mergeTypedSelectionSets(typedSelectionSets, sameUnionSelections)
+		case *ast.FragmentSpread:
+			fragment := config.step.FragmentDefinitions.ForName(selection.Name)
+			if fragment == nil {
+				fragment = config.plan.FragmentDefinitions.ForName(selection.Name)
+			}
+			sameUnionSelections := map[string]ast.SelectionSet{
+				fragment.TypeCondition: fragment.SelectionSet,
+			}
+			if fragment.TypeCondition == unionName {
+				sameUnionSelections = p.flattenSameUnionSelections(config, unionName, fragment.SelectionSet)
+			}
+			mergeTypedSelectionSets(typedSelectionSets, sameUnionSelections)
+		default:
+			panic(fmt.Sprintf("unsupported selection type inside union: %T", selection)) // should be impossible to reach with an exhaustive switch
+		}
+	}
+	return typedSelectionSets
+}
+
+func mergeTypedSelectionSets(destination, source map[string]ast.SelectionSet) {
+	for typeName, selectionSet := range source {
+		destination[typeName] = append(destination[typeName], selectionSet...)
+	}
 }
 
 func (p *MinQueriesPlanner) extractSelection(ctx *PlanningContext, config *extractSelectionConfig) (ast.SelectionSet, error) {
@@ -349,14 +463,15 @@ func (p *MinQueriesPlanner) extractSelection(ctx *PlanningContext, config *extra
 				"\n\tParent Type: %s"+
 				"\n\tLocation: %v"+
 				"\n\tInsertion point: %v",
-			config.parentType, location, config.insertionPoint))
+			config.parentType, location, config.insertionPoint,
+		))
 
 		// if there are selections in this bundle that are not from the parent location we need to add
 		// id to the selection set
 		checkForID = true
 
 		// if we have a wrapper to add
-		if config.wrapper != nil && len(config.wrapper) > 0 {
+		if len(config.wrapper) > 0 {
 			ctx.Gateway.logger.Debug("wrapping selection", config.wrapper)
 
 			// use the wrapped version
@@ -406,8 +521,7 @@ func (p *MinQueriesPlanner) extractSelection(ctx *PlanningContext, config *extra
 			// modify its selection set to only include fields that are at the same location as the parent.
 			if len(selection.SelectionSet) > 0 {
 				// the insertion point for this field is the previous one with the new field name
-				insertionPoint := make([]string, len(config.insertionPoint))
-				copy(insertionPoint, config.insertionPoint)
+				insertionPoint := copyStrings(config.insertionPoint)
 				insertionPoint = append(insertionPoint, selection.Alias)
 
 				// if this field is being wrapped in a fragment then we need to make sure
@@ -423,28 +537,54 @@ func (p *MinQueriesPlanner) extractSelection(ctx *PlanningContext, config *extra
 				}
 
 				ctx.Gateway.logger.Debug("found a thing with a selection. extracting to ", insertionPoint, ". Parent insertion", config.insertionPoint)
-				// add any possible selections provided by this fields selections
-				subSelection, err := p.extractSelection(ctx, &extractSelectionConfig{
-					stepCh:         config.stepCh,
-					stepWg:         config.stepWg,
-					step:           config.step,
-					locations:      config.locations,
-					parentLocation: config.parentLocation,
-					plan:           config.plan,
+				fieldTypeName := coreFieldType(selection).Name()
+				var subSelectionTypes map[string]ast.SelectionSet
+				if ctx.Schema.Types[fieldTypeName].Kind == ast.Union {
+					// Union types MUST be object types, and can't have fields of their own:
+					// > GraphQL Unions represent an object that could be one of a list of GraphQL Object types, but provides for no guaranteed fields between those types.
+					// > - https://spec.graphql.org/October2021/#sec-Unions
+					//
+					// Service schemas may not define a union type containing one of their shared types, and querying it on that service would result in an error.
+					// For these cases, union selections MUST flatten into selected fragments on the union's named types,
+					// so that each member type's fields are planned against the member type (not the union).
+					// The planned fields are wrapped back into an inline fragment on the member type below.
+					subSelectionTypes = p.flattenSameUnionSelections(config, fieldTypeName, selection.SelectionSet)
+				} else {
+					subSelectionTypes = map[string]ast.SelectionSet{fieldTypeName: selection.SelectionSet}
+				}
+				var subSelections ast.SelectionSet
+				for _, typeName := range slices.Sorted(maps.Keys(subSelectionTypes)) {
+					selectionSet := subSelectionTypes[typeName]
+					// add any possible selections provided by this fields selections
+					subSelection, err := p.extractSelection(ctx, &extractSelectionConfig{
+						stepCh:         config.stepCh,
+						stepWg:         config.stepWg,
+						step:           config.step,
+						locations:      config.locations,
+						parentLocation: config.parentLocation,
+						plan:           config.plan,
 
-					parentType:     coreFieldType(selection).Name(),
-					selection:      selection.SelectionSet,
-					insertionPoint: insertionPoint,
-					wrapper:        wrapper,
-				})
-				if err != nil {
-					return nil, err
+						parentType:     typeName,
+						selection:      selectionSet,
+						insertionPoint: insertionPoint,
+						wrapper:        wrapper,
+					})
+					if err != nil {
+						return nil, err
+					}
+					if typeName != fieldTypeName {
+						subSelection = ast.SelectionSet{&ast.InlineFragment{
+							TypeCondition: typeName,
+							SelectionSet:  subSelection,
+						}}
+					}
+					subSelections = append(subSelections, subSelection...)
 				}
 
-				ctx.Gateway.logger.Debug(fmt.Sprintf("final selection for %s.%s: %v\n", config.parentType, selection.Name, subSelection))
+				ctx.Gateway.logger.Debug(fmt.Sprintf("final selection for %s.%s: %v\n", config.parentType, selection.Name, subSelections))
 
 				// overwrite the selection set for this selection
-				selection.SelectionSet = subSelection
+				selection.SelectionSet = subSelections
 			} else {
 				ctx.Gateway.logger.Debug("found a scalar")
 			}
@@ -453,6 +593,11 @@ func (p *MinQueriesPlanner) extractSelection(ctx *PlanningContext, config *extra
 			// any variables that this field depends on need to be added to the steps list of variables
 			for _, variable := range graphql.ExtractVariables(selection.Arguments) {
 				config.step.Variables.Add(variable)
+			}
+			for _, directive := range selection.Directives {
+				for _, variable := range graphql.ExtractVariables(directive.Arguments) {
+					config.step.Variables.Add(variable)
+				}
 			}
 
 			// add it to the list
@@ -495,7 +640,8 @@ func (p *MinQueriesPlanner) extractSelection(ctx *PlanningContext, config *extra
 			// if the step does not have a definition for this fragment
 			if addDefn {
 				// we're going to leave a different fragment definition behind for this step
-				config.step.FragmentDefinitions = append(config.step.FragmentDefinitions,
+				config.step.FragmentDefinitions = append(
+					config.step.FragmentDefinitions,
 					&ast.FragmentDefinition{
 						Name:          selection.Name,
 						TypeCondition: defn.TypeCondition,
@@ -528,7 +674,6 @@ func (p *MinQueriesPlanner) extractSelection(ctx *PlanningContext, config *extra
 				selection:  selection.SelectionSet,
 				wrapper:    newWrapper,
 			})
-
 			if err != nil {
 				return nil, err
 			}
@@ -545,7 +690,6 @@ func (p *MinQueriesPlanner) extractSelection(ctx *PlanningContext, config *extra
 }
 
 func (p *MinQueriesPlanner) wrapSelectionSet(ctx *PlanningContext, config *extractSelectionConfig, locationFragments map[string]ast.FragmentDefinitionList, location string, selectionSet ast.SelectionSet) (ast.SelectionSet, error) {
-
 	ctx.Gateway.logger.Debug("wrapping selection", config.wrapper)
 
 	// pointers required to nest the
@@ -597,7 +741,7 @@ func (p *MinQueriesPlanner) wrapSelectionSet(ctx *PlanningContext, config *extra
 
 		// if we couldn't find the definition
 		if defn == nil {
-			return nil, errors.New("Could not find defn")
+			return nil, errors.New("could not find defn")
 		}
 
 		// update its selection set
@@ -608,36 +752,37 @@ func (p *MinQueriesPlanner) wrapSelectionSet(ctx *PlanningContext, config *extra
 }
 
 // selects one location out of possibleLocations, prioritizing the parent's location and the internal schema
-func (p *MinQueriesPlanner) selectLocation(possibleLocations []string, config *extractSelectionConfig) string {
+func (p *MinQueriesPlanner) selectLocation(ctx *PlanningContext, fieldName string, possibleLocations []string, config *extractSelectionConfig) string {
 	// if this field can only be found in one location
 	if len(possibleLocations) == 1 {
 		return possibleLocations[0]
-		// the field can be found in many locations
-	} else {
-		// locations to prioritize first
-		priorities := make([]string, len(p.LocationPriorities), len(p.LocationPriorities)+2)
-		copy(priorities, p.LocationPriorities)
-		priorities = append(priorities, config.parentLocation, internalSchemaLocation)
+	}
+	// the field can be found in many locations
 
-		for _, priority := range priorities {
-			// look to see if the current location is one of the possible locations
-			for _, location := range possibleLocations {
-				// if the location is the same as the parent
-				if location == priority {
-					// assign this field to the parents entry
-					return priority
-				}
+	// locations to prioritize first
+	initialLocationPriorities := []string{config.parentLocation, internalSchemaLocation}
+	priorities := make([]string, len(p.LocationPriorities), len(p.LocationPriorities)+len(initialLocationPriorities))
+	copy(priorities, p.LocationPriorities)
+	priorities = append(priorities, initialLocationPriorities...)
+
+	for _, priority := range priorities {
+		// look to see if the current location is one of the possible locations
+		for _, location := range possibleLocations {
+			// if the location is the same as the parent
+			if location == priority {
+				// assign this field to the parents entry
+				return priority
 			}
 		}
-
-		// if we got here then this field can be found in multiple services and none of the top priority locations.
-		// for now, just use the first one
-		return possibleLocations[0]
 	}
+
+	// if we got here then this field can be found in multiple services and none of the top priority locations.
+	// for now, just use the first one
+	ctx.Gateway.logger.WithFields(LoggerFields{"locations": possibleLocations, "field": fmt.Sprintf("%s.%s", config.parentType, fieldName)}).Debug("Multiple locations available for field, but none have priority; arbitrarily selecting first one")
+	return possibleLocations[0]
 }
 
 func (p *MinQueriesPlanner) groupSelectionSet(ctx *PlanningContext, config *extractSelectionConfig) (map[string]ast.SelectionSet, map[string]ast.FragmentDefinitionList, error) {
-
 	locationFields := map[string]ast.SelectionSet{}
 	locationFragments := map[string]ast.FragmentDefinitionList{}
 
@@ -664,7 +809,7 @@ func (p *MinQueriesPlanner) groupSelectionSet(ctx *PlanningContext, config *extr
 				return nil, nil, err
 			}
 
-			location := p.selectLocation(possibleLocations, config)
+			location := p.selectLocation(ctx, selection.Name, possibleLocations, config)
 			locationFields[location] = append(locationFields[location], field)
 		case *ast.FragmentSpread:
 			ctx.Gateway.logger.Debug("Encountered fragment spread ", selection.Name)
@@ -680,7 +825,7 @@ func (p *MinQueriesPlanner) groupSelectionSet(ctx *PlanningContext, config *extr
 				// look in the operation
 				defn = config.plan.FragmentDefinitions.ForName(selection.Name)
 				if defn == nil {
-					return nil, nil, fmt.Errorf("Could not find definition for directive: %s", selection.Name)
+					return nil, nil, fmt.Errorf("could not find definition for directive: %s", selection.Name)
 				}
 			}
 
@@ -705,7 +850,7 @@ func (p *MinQueriesPlanner) groupSelectionSet(ctx *PlanningContext, config *extr
 						return nil, nil, err
 					}
 
-					fieldLocation := p.selectLocation(fieldLocations, config)
+					fieldLocation := p.selectLocation(ctx, field.Name, fieldLocations, config)
 					fragmentLocations[fieldLocation] = append(fragmentLocations[fieldLocation], field)
 
 				case *ast.FragmentSpread, *ast.InlineFragment:
@@ -750,8 +895,9 @@ func (p *MinQueriesPlanner) groupSelectionSet(ctx *PlanningContext, config *extr
 						return nil, nil, err
 					}
 
-					// add the field to the location
-					fragmentLocations[fieldLocations[0]] = append(fragmentLocations[fieldLocations[0]], fragmentSelection)
+					// add the field to the location, respecting parent location priority
+					fieldLocation := p.selectLocation(ctx, fragmentSelection.Name, fieldLocations, config)
+					fragmentLocations[fieldLocation] = append(fragmentLocations[fieldLocation], fragmentSelection)
 
 				case *ast.FragmentSpread, *ast.InlineFragment:
 					// non-field selections will be handled in the next tick
@@ -914,16 +1060,16 @@ func plannerBuildQuery(ctx *PlanningContext, operationName, parentType string, v
 
 	// assign the right operation
 	switch parentType {
-	case "Mutation":
+	case typeNameMutation:
 		operation.Operation = ast.Mutation
-	case "Subscription":
+	case typeNameSubscription:
 		operation.Operation = ast.Subscription
 	default:
 		operation.Operation = ast.Query
 	}
 
 	// if we are querying an operation all we need to do is add the selection set at the root
-	if parentType == "Query" || parentType == "Mutation" || parentType == "Subscription" {
+	if parentType == typeNameQuery || parentType == typeNameMutation || parentType == typeNameSubscription {
 		operation.SelectionSet = selectionSet
 	} else {
 		// if we are not querying the top level then we have to embed the selection set

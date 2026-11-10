@@ -2,20 +2,24 @@ package gateway
 
 import (
 	"fmt"
+	"iter"
+	"strings"
 	"testing"
 
 	"github.com/nautilus/graphql"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 	"github.com/vektah/gqlparser/v2/ast"
 )
 
 func TestPlanQuery_singleRootField(t *testing.T) {
+	t.Parallel()
 	// the location for the schema
 	location := "url1"
 
 	// the location map for fields for this query
 	locations := FieldURLMap{}
-	locations.RegisterURL("Query", "foo", location)
+	locations.RegisterURL(typeNameQuery, "foo", location)
 
 	schema, _ := graphql.LoadSchema(`
 		type Query {
@@ -58,12 +62,13 @@ func TestPlanQuery_singleRootField(t *testing.T) {
 }
 
 func TestPlanQuery_includeFragmentsSameLocation(t *testing.T) {
+	t.Parallel()
 	// the location for the schema
 	location := "url1"
 
 	// the location map for fields for this query
 	locations := FieldURLMap{}
-	locations.RegisterURL("Query", "foo", location)
+	locations.RegisterURL(typeNameQuery, "foo", location)
 
 	schema, _ := graphql.LoadSchema(`
 		type Query {
@@ -137,13 +142,14 @@ func TestPlanQuery_includeFragmentsSameLocation(t *testing.T) {
 // Tests that location selection for Fields within Fragment Spreads are correctly
 // prioritized, to avoid unnecessary federation steps.
 func TestPlanQuery_includeFragmentsBoundaryTypes(t *testing.T) {
+	t.Parallel()
 	// the locations for the schema
 	location1 := "url1"
 	location2 := "url2"
 
 	// the location map for fields for this query
 	locations := FieldURLMap{}
-	locations.RegisterURL("Query", "foo", location1)
+	locations.RegisterURL(typeNameQuery, "foo", location1)
 	locations.RegisterURL("BoundaryType", "a", location2)
 	locations.RegisterURL("BoundaryType", "a", location1)
 	locations.RegisterURL("BoundaryType", "b", location2)
@@ -214,14 +220,15 @@ func TestPlanQuery_includeFragmentsBoundaryTypes(t *testing.T) {
 }
 
 func TestPlanQuery_includeFragmentsDifferentLocation(t *testing.T) {
+	t.Parallel()
 	// the locations for the schema
 	location1 := "url1"
 	location2 := "url2"
 
 	// the location map for fields for this query
 	locations := FieldURLMap{}
-	locations.RegisterURL("Query", "foo", location1)
-	locations.RegisterURL("Query", "bar", location2)
+	locations.RegisterURL(typeNameQuery, "foo", location1)
+	locations.RegisterURL(typeNameQuery, "bar", location2)
 
 	schema, _ := graphql.LoadSchema(`
 		type Query {
@@ -246,7 +253,8 @@ func TestPlanQuery_includeFragmentsDifferentLocation(t *testing.T) {
 			Schema:    schema,
 			Locations: locations,
 			Gateway:   &Gateway{logger: &DefaultLogger{}},
-		})
+		},
+	)
 	// if something went wrong planning the query
 	if err != nil {
 		// the test is over
@@ -284,7 +292,7 @@ func TestPlanQuery_includeFragmentsDifferentLocation(t *testing.T) {
 	encounteredFields := Set{}
 
 	for _, definition := range (ast.FragmentDefinitionList{location1Defn, location2Defn}) {
-		assert.Equal(t, "Query", definition.TypeCondition)
+		assert.Equal(t, typeNameQuery, definition.TypeCondition)
 		assert.Equal(t, "Foo", definition.Name)
 		if len(definition.SelectionSet) != 1 {
 			t.Errorf("Encountered incorrect number of selections under fragment definition for location 1. Expected 1 found %v", len(location1Defn.SelectionSet))
@@ -303,14 +311,15 @@ func TestPlanQuery_includeFragmentsDifferentLocation(t *testing.T) {
 }
 
 func TestPlanQuery_includeInlineFragments(t *testing.T) {
+	t.Parallel()
 	// the locations for the schema
 	location1 := "url1"
 	location2 := "url2"
 
 	// the location map for fields for this query
 	locations := FieldURLMap{}
-	locations.RegisterURL("Query", "foo", location1)
-	locations.RegisterURL("Query", "bar", location2)
+	locations.RegisterURL(typeNameQuery, "foo", location1)
+	locations.RegisterURL(typeNameQuery, "bar", location2)
 
 	schema, _ := graphql.LoadSchema(`
 		type Query {
@@ -333,7 +342,8 @@ func TestPlanQuery_includeInlineFragments(t *testing.T) {
 			Schema:    schema,
 			Locations: locations,
 			Gateway:   &Gateway{logger: &DefaultLogger{}},
-		})
+		},
+	)
 	// if something went wrong planning the query
 	if err != nil {
 		// the test is over
@@ -377,7 +387,7 @@ func TestPlanQuery_includeInlineFragments(t *testing.T) {
 			return
 		}
 
-		assert.Equal(t, "Query", fragment.TypeCondition)
+		assert.Equal(t, typeNameQuery, fragment.TypeCondition)
 
 		if len(fragment.SelectionSet) != 1 {
 			t.Errorf("Encountered incorrect number of selections under fragment definition. Expected 1 found %v", len(fragment.SelectionSet))
@@ -396,14 +406,15 @@ func TestPlanQuery_includeInlineFragments(t *testing.T) {
 }
 
 func TestPlanQuery_nestedInlineFragmentsSameLocation(t *testing.T) {
+	t.Parallel()
 	// the locations for the schema
 	loc1 := "url1"
 	loc2 := "url2"
 
 	// the location map for fields for this query
 	locations := FieldURLMap{}
-	locations.RegisterURL("Query", "foo", loc1)
-	locations.RegisterURL("Query", "bar", loc2)
+	locations.RegisterURL(typeNameQuery, "foo", loc1)
+	locations.RegisterURL(typeNameQuery, "bar", loc2)
 
 	schema, _ := graphql.LoadSchema(`
 		type Query {
@@ -427,7 +438,8 @@ func TestPlanQuery_nestedInlineFragmentsSameLocation(t *testing.T) {
 			Schema:    schema,
 			Locations: locations,
 			Gateway:   &Gateway{logger: &DefaultLogger{}},
-		})
+		},
+	)
 	// if something went wrong planning the query
 	if err != nil {
 		// the test is over
@@ -527,12 +539,13 @@ func TestPlanQuery_nestedInlineFragmentsSameLocation(t *testing.T) {
 }
 
 func TestPlanQuery_singleRootObject(t *testing.T) {
+	t.Parallel()
 	// the location for the schema
 	location := "url1"
 
 	// the location map for fields for this query
 	locations := FieldURLMap{}
-	locations.RegisterURL("Query", "allUsers", location)
+	locations.RegisterURL(typeNameQuery, "allUsers", location)
 	locations.RegisterURL("User", "firstName", location)
 	locations.RegisterURL("User", "friends", location)
 
@@ -628,10 +641,10 @@ func TestPlanQuery_singleRootObject(t *testing.T) {
 		t.Error("Did not get an  inner firstName out of the allUsers selection")
 	}
 	assert.Equal(t, "firstName", firstNameInnerField.Name)
-
 }
 
 func TestPlanQuery_subGraphs(t *testing.T) {
+	t.Parallel()
 	schema, _ := graphql.LoadSchema(`
 		type User {
 			firstName: String!
@@ -655,7 +668,7 @@ func TestPlanQuery_subGraphs(t *testing.T) {
 
 	// the location map for fields for this query
 	locations := FieldURLMap{}
-	locations.RegisterURL("Query", "allUsers", userLocation)
+	locations.RegisterURL(typeNameQuery, "allUsers", userLocation)
 	locations.RegisterURL("User", "firstName", userLocation)
 	locations.RegisterURL("User", "catPhotos", catLocation)
 	locations.RegisterURL("CatPhoto", "URL", catLocation)
@@ -694,7 +707,7 @@ func TestPlanQuery_subGraphs(t *testing.T) {
 	// the first step should have all users
 	firstStep := plans[0].RootStep.Then[0]
 	// make sure we are grabbing values off of Query since its the root
-	assert.Equal(t, "Query", firstStep.ParentType)
+	assert.Equal(t, typeNameQuery, firstStep.ParentType)
 
 	// make sure there's a selection set
 	if len(firstStep.SelectionSet) != 1 {
@@ -798,6 +811,7 @@ func TestPlanQuery_subGraphs(t *testing.T) {
 }
 
 func TestPlanQuery_preferParentLocation(t *testing.T) {
+	t.Parallel()
 
 	schema, _ := graphql.LoadSchema(`
 		type User {
@@ -816,7 +830,7 @@ func TestPlanQuery_preferParentLocation(t *testing.T) {
 
 	// the location map for fields for this query
 	locations := FieldURLMap{}
-	locations.RegisterURL("Query", "allUsers", userLocation)
+	locations.RegisterURL(typeNameQuery, "allUsers", userLocation)
 	// add the
 	locations.RegisterURL("User", "id", catLocation)
 	locations.RegisterURL("User", "id", userLocation)
@@ -845,7 +859,7 @@ func TestPlanQuery_preferParentLocation(t *testing.T) {
 	// the first step should have all users
 	firstStep := plans[0].RootStep.Then[0]
 	// make sure we are grabbing values off of Query since its the root
-	assert.Equal(t, "Query", firstStep.ParentType)
+	assert.Equal(t, typeNameQuery, firstStep.ParentType)
 
 	// make sure there's a selection set
 	if len(firstStep.Then) != 0 {
@@ -855,6 +869,7 @@ func TestPlanQuery_preferParentLocation(t *testing.T) {
 }
 
 func TestPlanQuery_scrubFields(t *testing.T) {
+	t.Parallel()
 	schema, _ := graphql.LoadSchema(`
 		type User {
 			id: ID!
@@ -880,7 +895,7 @@ func TestPlanQuery_scrubFields(t *testing.T) {
 
 	// the location map for fields for this query
 	locations := FieldURLMap{}
-	locations.RegisterURL("Query", "allUsers", userLocation)
+	locations.RegisterURL(typeNameQuery, "allUsers", userLocation)
 	locations.RegisterURL("CatPhoto", "owner", userLocation)
 	locations.RegisterURL("User", "firstName", userLocation)
 	locations.RegisterURL("User", "favoriteCatSpecies", catLocation)
@@ -889,6 +904,7 @@ func TestPlanQuery_scrubFields(t *testing.T) {
 	locations.RegisterURL("CatPhoto", "URL", catLocation)
 
 	t.Run("Multiple Step Scrubbing", func(t *testing.T) {
+		t.Parallel()
 		plans, err := (&MinQueriesPlanner{}).Plan(&PlanningContext{
 			Query: `
 				{
@@ -921,6 +937,7 @@ func TestPlanQuery_scrubFields(t *testing.T) {
 	})
 
 	t.Run("Single Step no Scrubbing", func(t *testing.T) {
+		t.Parallel()
 		plans, err := (&MinQueriesPlanner{}).Plan(&PlanningContext{
 			Query: `
 					{
@@ -946,6 +963,7 @@ func TestPlanQuery_scrubFields(t *testing.T) {
 	})
 
 	t.Run("Existing id", func(t *testing.T) {
+		t.Parallel()
 		plans, err := (&MinQueriesPlanner{}).Plan(&PlanningContext{
 			Query: `
 				{
@@ -979,6 +997,7 @@ func TestPlanQuery_scrubFields(t *testing.T) {
 }
 
 func TestPlanQuery_groupSiblings(t *testing.T) {
+	t.Parallel()
 	schema, _ := graphql.LoadSchema(`
 		type User {
 			favoriteCatSpecies: String!
@@ -1001,7 +1020,7 @@ func TestPlanQuery_groupSiblings(t *testing.T) {
 
 	// the location map for fields for this query
 	locations := FieldURLMap{}
-	locations.RegisterURL("Query", "allUsers", userLocation)
+	locations.RegisterURL(typeNameQuery, "allUsers", userLocation)
 	locations.RegisterURL("User", "favoriteCatSpecies", catLocation)
 	locations.RegisterURL("User", "catPhotos", catLocation)
 	locations.RegisterURL("CatPhoto", "URL", catLocation)
@@ -1035,7 +1054,7 @@ func TestPlanQuery_groupSiblings(t *testing.T) {
 	// the first step should have all users
 	firstStep := plans[0].RootStep.Then[0]
 	// make sure we are grabbing values off of Query since its the root
-	assert.Equal(t, "Query", firstStep.ParentType)
+	assert.Equal(t, typeNameQuery, firstStep.ParentType)
 
 	// make sure there's a selection set
 	if len(firstStep.Then) != 1 {
@@ -1045,6 +1064,7 @@ func TestPlanQuery_groupSiblings(t *testing.T) {
 }
 
 func TestPlanQuery_nodeField(t *testing.T) {
+	t.Parallel()
 	// the query to test
 	// query {
 	//     node(id: $id) {
@@ -1059,7 +1079,7 @@ func TestPlanQuery_nodeField(t *testing.T) {
 	locations := FieldURLMap{}
 	locations.RegisterURL("User", "firstName", "url1")
 	locations.RegisterURL("User", "lastName", "url2")
-	locations.RegisterURL("Query", "node", "url1", "url2", internalSchemaLocation)
+	locations.RegisterURL(typeNameQuery, "node", "url1", "url2", internalSchemaLocation)
 
 	// load the query we're going to query
 	schema, err := graphql.LoadSchema(`
@@ -1134,6 +1154,7 @@ func TestPlanQuery_nodeField(t *testing.T) {
 	}
 
 	t.Run("Url1 Step", func(t *testing.T) {
+		t.Parallel()
 		// the url1 step should have Node as the parent type
 		assert.Equal(t, "Node", url1Step.ParentType)
 		// there should be one selection set
@@ -1156,6 +1177,7 @@ func TestPlanQuery_nodeField(t *testing.T) {
 	})
 
 	t.Run("Url2 Step", func(t *testing.T) {
+		t.Parallel()
 		// the url1 step should have Node as the parent type
 		assert.Equal(t, "Node", url2Step.ParentType)
 		// there should be one selection set
@@ -1179,6 +1201,7 @@ func TestPlanQuery_nodeField(t *testing.T) {
 }
 
 func TestPlanQuery_stepVariables(t *testing.T) {
+	t.Parallel()
 	// the query to test
 	// query($id: ID!, $category: String!) {
 	// 		user(id: $id) {
@@ -1193,7 +1216,7 @@ func TestPlanQuery_stepVariables(t *testing.T) {
 
 	// the location map for fields for this query
 	locations := FieldURLMap{}
-	locations.RegisterURL("Query", "user", "url1")
+	locations.RegisterURL(typeNameQuery, "user", "url1")
 	locations.RegisterURL("User", "favoriteCatPhoto", "url2")
 	locations.RegisterURL("CatPhoto", "URL", "url2")
 
@@ -1262,13 +1285,14 @@ func TestPlanQuery_stepVariables(t *testing.T) {
 }
 
 func TestPlanQuery_singleFragmentMultipleLocations(t *testing.T) {
+	t.Parallel()
 	// the locations for the schema
 	loc1 := "url1"
 	loc2 := "url2"
 
 	// the location map for fields for this query
 	locations := FieldURLMap{}
-	locations.RegisterURL("Query", "user", loc2)
+	locations.RegisterURL(typeNameQuery, "user", loc2)
 	locations.RegisterURL("User", "lastName", loc1)
 	locations.RegisterURL("User", "id", loc1, loc2)
 
@@ -1386,7 +1410,8 @@ func TestPlanQuery_singleFragmentMultipleLocations(t *testing.T) {
 	assert.Len(t, secondStep.Then, 0)
 
 	// there should be one selection on the step
-	if !assert.Len(t, secondStep.SelectionSet, 1,
+	if !assert.Len(
+		t, secondStep.SelectionSet, 1,
 		"Second step had the wrong number of selections %v", graphql.FormatSelectionSet(secondStep.SelectionSet),
 	) {
 		return
@@ -1446,10 +1471,10 @@ func TestPlanQuery_singleFragmentMultipleLocations(t *testing.T) {
 	}
 
 	assert.Equal(t, "lastName", userInfoSelection.Name)
-
 }
 
 func TestPlannerBuildQuery_query(t *testing.T) {
+	t.Parallel()
 	// if we pass a query on Query to the builder we should get that same
 	// selection set present in the operation without any nesting
 	selection := ast.SelectionSet{
@@ -1475,7 +1500,7 @@ func TestPlannerBuildQuery_query(t *testing.T) {
 
 	// the query we're building goes to the top level Query object
 	ctx := &PlanningContext{Gateway: &Gateway{logger: &DefaultLogger{}}}
-	operation := plannerBuildQuery(ctx, "hoopla", "Query", variables, selection, ast.FragmentDefinitionList{})
+	operation := plannerBuildQuery(ctx, "hoopla", typeNameQuery, variables, selection, ast.FragmentDefinitionList{})
 	if operation == nil {
 		t.Error("Did not receive a query.")
 		return
@@ -1491,6 +1516,7 @@ func TestPlannerBuildQuery_query(t *testing.T) {
 }
 
 func TestPlannerBuildQuery_node(t *testing.T) {
+	t.Parallel()
 	// if we are querying a specific type/id then we need to perform a query similar to
 	// {
 	// 		node(id: $id) {
@@ -1583,25 +1609,22 @@ func TestPlannerBuildQuery_node(t *testing.T) {
 	assert.Equal(t, selection, fragment.SelectionSet)
 }
 
+/* TODO
 func TestPlanQuery_mutationsInSeries(t *testing.T) {
 	t.Skip("Not implemented")
 }
+*/
 
 func TestPlanQuery_forcedPriorityResolution(t *testing.T) {
+	t.Parallel()
 	location1 := "url1"
 	location2 := "url2"
-
-	type testCase struct {
-		priorities       []string
-		allUsersLocation string
-		lastNameLocation string
-	}
 
 	// The location map for fields for this query.
 	// All fields live on location1. "lastName" is
 	// additionally available on location2.
 	locations := FieldURLMap{}
-	locations.RegisterURL("Query", "allUsers", location1)
+	locations.RegisterURL(typeNameQuery, "allUsers", location1)
 	locations.RegisterURL("User", "firstName", location1)
 	locations.RegisterURL("User", "lastName", location1)
 	locations.RegisterURL("User", "lastName", location2)
@@ -1634,9 +1657,8 @@ func TestPlanQuery_forcedPriorityResolution(t *testing.T) {
 			Locations: locations,
 			Gateway:   &Gateway{logger: &DefaultLogger{}},
 		})
-
 		if err != nil {
-			return nil, fmt.Errorf("encountered error when planning query: %s", err.Error())
+			return nil, fmt.Errorf("encountered error when planning query: %w", err)
 		}
 
 		return selections, nil
@@ -1646,7 +1668,7 @@ func TestPlanQuery_forcedPriorityResolution(t *testing.T) {
 	//
 	// Plan with no manually defined priorities.
 	// locality rules dictate that "lastName" should
-	// be resolved at location1, since it is avaiable
+	// be resolved at location1, since it is available
 	// in both locations but the parent "allUsers"
 	// query only lives on location1.
 
@@ -1708,6 +1730,7 @@ func TestPlanQuery_forcedPriorityResolution(t *testing.T) {
 }
 
 func TestPlanQuery_scrubWithAlias(t *testing.T) {
+	t.Parallel()
 	schema, _ := graphql.LoadSchema(`
 		type User {
 			firstName: String!
@@ -1730,7 +1753,7 @@ func TestPlanQuery_scrubWithAlias(t *testing.T) {
 
 	// the location map for fields for this query
 	locations := FieldURLMap{}
-	locations.RegisterURL("Query", "allUsers", userLocation)
+	locations.RegisterURL(typeNameQuery, "allUsers", userLocation)
 	locations.RegisterURL("User", "firstName", userLocation)
 	locations.RegisterURL("User", "catPhotos", catLocation)
 	locations.RegisterURL("CatPhoto", "URL", catLocation)
@@ -1761,7 +1784,7 @@ func TestPlanQuery_scrubWithAlias(t *testing.T) {
 	// the first step should have all users
 	firstStep := plans[0].RootStep.Then[0]
 	// make sure we are grabbing values off of Query since its the root
-	assert.Equal(t, "Query", firstStep.ParentType)
+	assert.Equal(t, typeNameQuery, firstStep.ParentType)
 
 	// make sure there's a selection set
 	if len(firstStep.SelectionSet) != 1 {
@@ -1772,4 +1795,498 @@ func TestPlanQuery_scrubWithAlias(t *testing.T) {
 	firstField := graphql.SelectedFields(firstStep.SelectionSet)[0]
 	assert.Equal(t, "allUsers", firstField.Name)
 	assert.Equal(t, "users", firstField.Alias)
+}
+
+func TestPlanQuery_inlineFragmentFieldsRespectParentLocation(t *testing.T) {
+	t.Parallel()
+	schema, err := graphql.LoadSchema(`
+		type Query {
+			foo: Foo!
+		}
+		type Foo {
+			bar: String!
+		}
+	`)
+	require.NoError(t, err)
+
+	const (
+		location0 = "url0"
+		location1 = "url1"
+	)
+	locations := FieldURLMap{}
+	// location0 registers type Foo
+	locations.RegisterURL("Foo", "bar", location0)
+
+	// location1 registers foo Query field and type Foo
+	locations.RegisterURL(typeNameQuery, "foo", location1)
+	locations.RegisterURL("Foo", "bar", location1)
+
+	plans, err := (&MinQueriesPlanner{}).Plan(&PlanningContext{
+		Query: `
+			query {
+				foo {
+					... on Foo {
+						bar
+					}
+				}
+			}
+		`,
+		Schema:    schema,
+		Locations: locations,
+		Gateway:   &Gateway{logger: &DefaultLogger{}},
+	})
+	require.NoError(t, err)
+	require.Len(t, plans, 1)
+
+	rootSteps := plans[0].RootStep.Then
+	require.Len(t, rootSteps, 1, "should have exactly one root step")
+
+	step := rootSteps[0]
+	queryer := step.Queryer.(*graphql.SingleRequestQueryer)
+	assert.Equal(t, location1, queryer.URL(), "field bar on inline fragment should be routed to location1")
+	assert.Empty(t, step.Then, "should have no dependent sub-steps — all fields should stay on location1")
+}
+
+func TestPlanQuery_unionShouldNotBeQueriedOnOtherServices(t *testing.T) {
+	t.Parallel()
+	schema, err := graphql.LoadSchema(`
+		type Query {
+			foo: Foo!  # Only in location1
+			node(id: ID!): Node
+		}
+		union Foo = Bar | Baz  # Only in location1
+		interface Node {
+			id: ID!
+		}
+		type Bar implements Node {
+			id: ID!
+			bar: String!  # Only in location0
+		}
+		type Baz implements Node {
+			id: ID!
+		}
+	`)
+	require.NoError(t, err)
+
+	const (
+		location0 = "url0"
+		location1 = "url1"
+	)
+	locations := FieldURLMap{}
+	// location0 registers all shared types (Bar, Baz) but no unions
+	locations.RegisterURL(typeNameQuery, "node", location0)
+	locations.RegisterURL("Node", "id", location0)
+	locations.RegisterURL("Bar", "id", location0)
+	locations.RegisterURL("Bar", "bar", location0) // unique to location0
+	locations.RegisterURL("Baz", "id", location0)
+
+	// location1 registers foo union-typed 'Foo' field and all shared types (Bar, Baz)
+	locations.RegisterURL(typeNameQuery, "node", location1)
+	locations.RegisterURL(typeNameQuery, "foo", location1) // unique to location1
+	locations.RegisterURL("Node", "id", location1)
+	locations.RegisterURL("Bar", "id", location1)
+	locations.RegisterURL("Baz", "id", location1)
+
+	plans, err := (&MinQueriesPlanner{}).Plan(&PlanningContext{
+		Query: `
+			query {
+				foo {
+					... on Bar {
+						bar
+					}
+				}
+			}
+		`,
+		Schema:    schema,
+		Locations: locations,
+		Gateway:   &Gateway{logger: &DefaultLogger{}},
+	})
+	require.NoError(t, err)
+	require.Len(t, plans, 1)
+
+	rootSteps := plans[0].RootStep.Then
+	require.Len(t, rootSteps, 1, "should have exactly one root step")
+
+	for step := range allSteps(plans[0].RootStep) {
+		url := step.Queryer.(*graphql.SingleRequestQueryer).URL()
+		t.Logf("Found step on %q: %s", url, step.QueryString)
+		switch url {
+		case location0:
+			assert.NotContains(t, step.QueryString, "Foo", "Location 0 must not be called with 'Foo' union type")
+			assert.Equal(t, strings.TrimSpace(`
+query ($id: ID!) {
+	node(id: $id) {
+		... on Bar {
+			bar
+		}
+	}
+}`), strings.TrimSpace(step.QueryString))
+		case location1:
+			assert.Equal(t, strings.TrimSpace(`
+query {
+	foo {
+		... on Bar {
+			id
+		}
+	}
+}`), strings.TrimSpace(step.QueryString), "the id needed for the node lookup must stay inside the member type fragment, a union has no id field")
+		}
+	}
+}
+
+// Regression test: when the union field and all of its members' fields live on one service, the planner must
+// send the typed fragments through unchanged. Flattening `... on Bar { bar }` into `bar` produces a query
+// that is invalid against the union type.
+func TestPlanQuery_unionSingleLocationKeepsTypeConditions(t *testing.T) {
+	t.Parallel()
+	schema, err := graphql.LoadSchema(`
+		type Query {
+			foo: Foo!
+		}
+		union Foo = Bar | Baz
+		type Bar {
+			id: ID!
+			bar: String!
+		}
+		type Baz {
+			id: ID!
+			baz: String!
+		}
+	`)
+	require.NoError(t, err)
+
+	const location = "url0"
+	locations := FieldURLMap{}
+	locations.RegisterURL(typeNameQuery, "foo", location)
+	for _, typeName := range []string{"Foo", "Bar", "Baz"} {
+		locations.RegisterURL(typeName, typenameField, location)
+	}
+	locations.RegisterURL("Bar", "id", location)
+	locations.RegisterURL("Bar", "bar", location)
+	locations.RegisterURL("Baz", "id", location)
+	locations.RegisterURL("Baz", "baz", location)
+
+	plans, err := (&MinQueriesPlanner{}).Plan(&PlanningContext{
+		Query: `
+			query {
+				foo {
+					__typename
+					... on Bar {
+						__typename
+						bar
+					}
+					... on Baz {
+						baz
+					}
+				}
+			}
+		`,
+		Schema:    schema,
+		Locations: locations,
+		Gateway:   &Gateway{logger: &DefaultLogger{}},
+	})
+	require.NoError(t, err)
+
+	assertPlannedQueries(t, map[string][]string{
+		location: {`query {
+	foo {
+		... on Bar {
+			__typename
+			bar
+		}
+		... on Baz {
+			baz
+		}
+		__typename
+	}
+}
+`},
+	}, plans)
+}
+
+// unionTestSchemaAndLocations returns a schema with a union type 'Foo' served only by location1,
+// whose member types are shared with location0. Field Bar.bar is unique to location0.
+func unionTestSchemaAndLocations(t *testing.T) (*ast.Schema, FieldURLMap, string, string) {
+	t.Helper()
+	schema, err := graphql.LoadSchema(`
+		type Query {
+			foo: Foo!  # Only in location1
+			node(id: ID!): Node
+		}
+		union Foo = Bar | Baz  # Only in location1
+		interface Node {
+			id: ID!
+		}
+		type Bar implements Node {
+			id: ID!
+			bar: String!  # Only in location0
+		}
+		type Baz implements Node {
+			id: ID!
+		}
+	`)
+	require.NoError(t, err)
+
+	const (
+		location0 = "url0"
+		location1 = "url1"
+	)
+	locations := FieldURLMap{}
+	// location0 registers all shared types (Bar, Baz) but no unions
+	locations.RegisterURL(typeNameQuery, "node", location0)
+	locations.RegisterURL("Node", "id", location0)
+	locations.RegisterURL("Bar", "id", location0)
+	locations.RegisterURL("Bar", "bar", location0) // unique to location0
+	locations.RegisterURL("Baz", "id", location0)
+	locations.RegisterURL("Bar", typenameField, location0)
+	locations.RegisterURL("Baz", typenameField, location0)
+
+	// location1 registers foo union-typed 'Foo' field and all shared types (Bar, Baz)
+	locations.RegisterURL(typeNameQuery, "node", location1)
+	locations.RegisterURL(typeNameQuery, "foo", location1) // unique to location1
+	locations.RegisterURL("Node", "id", location1)
+	locations.RegisterURL("Bar", "id", location1)
+	locations.RegisterURL("Baz", "id", location1)
+	locations.RegisterURL("Foo", typenameField, location1)
+	locations.RegisterURL("Bar", typenameField, location1)
+	locations.RegisterURL("Baz", typenameField, location1)
+
+	return schema, locations, location0, location1
+}
+
+// Regression test: __typename is the only field the GraphQL spec allows directly on a union selection set,
+// and clients like Apollo add it automatically. The planner must accept it and request it from the service
+// that owns the union field, while still collapsing the typed fragments onto their object types.
+func TestPlanQuery_unionAllowsTypenameField(t *testing.T) {
+	t.Parallel()
+	schema, locations, location0, location1 := unionTestSchemaAndLocations(t)
+
+	plans, err := (&MinQueriesPlanner{}).Plan(&PlanningContext{
+		Query: `
+			query {
+				foo {
+					__typename
+					... on Bar {
+						__typename
+						bar
+					}
+					... on Baz {
+						__typename
+						id
+					}
+				}
+			}
+		`,
+		Schema:    schema,
+		Locations: locations,
+		Gateway:   &Gateway{logger: &DefaultLogger{}},
+	})
+	require.NoError(t, err)
+
+	assertPlannedQueries(t, map[string][]string{
+		// the union itself, its __typename, and the ids for the node lookup come from the service owning foo
+		location1: {`query {
+	foo {
+		... on Bar {
+			__typename
+			id
+		}
+		... on Baz {
+			__typename
+			id
+		}
+		__typename
+	}
+}
+`},
+		// Bar.bar is only available on location0, which does not know the union Foo
+		location0: {`query ($id: ID!) {
+	node(id: $id) {
+		... on Bar {
+			bar
+		}
+	}
+}
+`},
+	}, plans)
+}
+
+// Regression test: a named fragment spread directly on a union field must resolve the fragment by the
+// spread's name (not the parent field's name) and must not panic.
+func TestPlanQuery_unionAllowsFragmentSpread(t *testing.T) {
+	t.Parallel()
+	schema, locations, location0, location1 := unionTestSchemaAndLocations(t)
+
+	plans, err := (&MinQueriesPlanner{}).Plan(&PlanningContext{
+		Query: `
+			query {
+				foo {
+					__typename
+					...barFields
+				}
+			}
+
+			fragment barFields on Bar {
+				bar
+			}
+		`,
+		Schema:    schema,
+		Locations: locations,
+		Gateway:   &Gateway{logger: &DefaultLogger{}},
+	})
+	require.NoError(t, err)
+
+	assertPlannedQueries(t, map[string][]string{
+		location1: {`query {
+	foo {
+		... on Bar {
+			id
+		}
+		__typename
+	}
+}
+`},
+		location0: {`query ($id: ID!) {
+	node(id: $id) {
+		... on Bar {
+			bar
+		}
+	}
+}
+`},
+	}, plans)
+}
+
+// Regression test: a named fragment declared on the union type itself (a common pattern with Apollo Client) must
+// be treated like selections written directly on the union. Its typed sub-fragments must be planned against
+// the member types, so the id for the node lookup ends up inside `... on Bar`, and the service that does not
+// know the union must not receive `... on Foo`.
+func TestPlanQuery_unionAllowsFragmentSpreadOnUnionType(t *testing.T) {
+	t.Parallel()
+	schema, locations, location0, location1 := unionTestSchemaAndLocations(t)
+
+	plans, err := (&MinQueriesPlanner{}).Plan(&PlanningContext{
+		Query: `
+			query {
+				foo {
+					...fooFields
+				}
+			}
+
+			fragment fooFields on Foo {
+				__typename
+				... on Bar {
+					bar
+				}
+			}
+		`,
+		Schema:    schema,
+		Locations: locations,
+		Gateway:   &Gateway{logger: &DefaultLogger{}},
+	})
+	require.NoError(t, err)
+
+	assertPlannedQueries(t, map[string][]string{
+		location1: {`query {
+	foo {
+		... on Bar {
+			id
+		}
+		__typename
+	}
+}
+`},
+		location0: {`query ($id: ID!) {
+	node(id: $id) {
+		... on Bar {
+			bar
+		}
+	}
+}
+`},
+	}, plans)
+}
+
+// Regression test: an inline fragment without a type condition applies to the union itself, so its selections
+// are treated as if they were written directly on the union. In practice such a fragment carries a directive
+// (`... @include(if: $x) { }`); directives on fragments inside a union are dropped by the planner, which is a
+// separate, pre-existing gap, so this test leaves the directive out.
+func TestPlanQuery_unionAllowsInlineFragmentWithoutTypeCondition(t *testing.T) {
+	t.Parallel()
+	schema, locations, location0, location1 := unionTestSchemaAndLocations(t)
+
+	plans, err := (&MinQueriesPlanner{}).Plan(&PlanningContext{
+		Query: `
+			query {
+				foo {
+					... {
+						__typename
+						... on Bar {
+							bar
+						}
+					}
+				}
+			}
+		`,
+		Schema:    schema,
+		Locations: locations,
+		Gateway:   &Gateway{logger: &DefaultLogger{}},
+	})
+	require.NoError(t, err)
+
+	assertPlannedQueries(t, map[string][]string{
+		location1: {`query {
+	foo {
+		... on Bar {
+			id
+		}
+		__typename
+	}
+}
+`},
+		location0: {`query ($id: ID!) {
+	node(id: $id) {
+		... on Bar {
+			bar
+		}
+	}
+}
+`},
+	}, plans)
+}
+
+// assertPlannedQueries asserts that executing the plans sends exactly the expected queries to each
+// downstream service (keyed by URL) and nothing else. Queries are compared ignoring the order of
+// selections within a selection set, because the planner groups union sub-selections by type in a map.
+func assertPlannedQueries(t *testing.T, expected map[string][]string, plans QueryPlanList) {
+	t.Helper()
+	actual := map[string][]string{}
+	for _, plan := range plans {
+		// the root step only fans out to its children and never queries a service itself
+		for _, rootChild := range plan.RootStep.Then {
+			for step := range allSteps(rootChild) {
+				url := step.Queryer.(*graphql.SingleRequestQueryer).URL()
+				actual[url] = append(actual[url], step.QueryString)
+			}
+		}
+	}
+	assert.Equal(t, expected, actual)
+}
+
+func allSteps(rootStep *QueryPlanStep) iter.Seq[*QueryPlanStep] {
+	return func(yield func(*QueryPlanStep) bool) {
+		allStepsRecursive(rootStep, yield)
+	}
+}
+
+func allStepsRecursive(step *QueryPlanStep, yield func(*QueryPlanStep) bool) bool {
+	if !yield(step) {
+		return false
+	}
+	for _, thenStep := range step.Then {
+		if !allStepsRecursive(thenStep, yield) {
+			return false
+		}
+	}
+	return true
 }

@@ -6,13 +6,14 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io/ioutil"
+	"io"
 	"net/http"
-	"sync"
 	"testing"
 
+	"github.com/nautilus/gateway/internal/execresult"
 	"github.com/nautilus/graphql"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 	"github.com/vektah/gqlparser/v2/ast"
 )
 
@@ -24,6 +25,7 @@ func (f roundTripFunc) RoundTrip(req *http.Request) (*http.Response, error) {
 }
 
 func TestExecutor_plansOfOne(t *testing.T) {
+	t.Parallel()
 	// build a query plan that the executor will follow
 	result, err := (&ParallelExecutor{}).Execute(&ExecutionContext{
 		logger: &DefaultLogger{},
@@ -33,7 +35,7 @@ func TestExecutor_plansOfOne(t *testing.T) {
 					{
 						// this is equivalent to
 						// query { values }
-						ParentType: "Query",
+						ParentType: typeNameQuery,
 						SelectionSet: ast.SelectionSet{
 							&ast.Field{
 								Name: "values",
@@ -43,12 +45,13 @@ func TestExecutor_plansOfOne(t *testing.T) {
 							},
 						},
 						// return a known value we can test against
-						Queryer: &graphql.MockSuccessQueryer{map[string]interface{}{
-							"values": []string{
-								"hello",
-								"world",
+						Queryer: &graphql.MockSuccessQueryer{
+							Value: map[string]interface{}{
+								"values": []string{
+									"hello",
+									"world",
+								},
 							},
-						},
 						},
 					},
 				},
@@ -70,6 +73,7 @@ func TestExecutor_plansOfOne(t *testing.T) {
 }
 
 func TestExecutor_plansWithDependencies(t *testing.T) {
+	t.Parallel()
 	// the query we want to execute is
 	// {
 	// 		user {                   <- from serviceA
@@ -88,10 +92,9 @@ func TestExecutor_plansWithDependencies(t *testing.T) {
 			RootStep: &QueryPlanStep{
 				Then: []*QueryPlanStep{
 					{
-
 						// this is equivalent to
 						// query { user }
-						ParentType:     "Query",
+						ParentType:     typeNameQuery,
 						InsertionPoint: []string{},
 						SelectionSet: ast.SelectionSet{
 							&ast.Field{
@@ -110,7 +113,7 @@ func TestExecutor_plansWithDependencies(t *testing.T) {
 							},
 						},
 						// return a known value we can test against
-						Queryer: &graphql.MockSuccessQueryer{map[string]interface{}{
+						Queryer: &graphql.MockSuccessQueryer{Value: map[string]interface{}{
 							"user": map[string]interface{}{
 								"id":        "1",
 								"firstName": "hello",
@@ -137,7 +140,7 @@ func TestExecutor_plansWithDependencies(t *testing.T) {
 										},
 									},
 								},
-								Queryer: &graphql.MockSuccessQueryer{map[string]interface{}{
+								Queryer: &graphql.MockSuccessQueryer{Value: map[string]interface{}{
 									"node": map[string]interface{}{
 										"favoriteCatPhoto": map[string]interface{}{
 											"url": "hello world",
@@ -169,6 +172,7 @@ func TestExecutor_plansWithDependencies(t *testing.T) {
 }
 
 func TestExecutor_emptyPlansWithDependencies(t *testing.T) {
+	t.Parallel()
 	// the query we want to execute is
 	// {
 	// 		user {                   <- from serviceA
@@ -185,14 +189,14 @@ func TestExecutor_emptyPlansWithDependencies(t *testing.T) {
 				Then: []*QueryPlanStep{
 					{ // this is equivalent to
 						// query { user }
-						ParentType:     "Query",
+						ParentType:     typeNameQuery,
 						InsertionPoint: []string{},
 						// return a known value we can test against
-						Queryer: &graphql.MockSuccessQueryer{map[string]interface{}{}},
+						Queryer: &graphql.MockSuccessQueryer{Value: map[string]interface{}{}},
 						// then we have to ask for the users favorite cat photo and its url
 						Then: []*QueryPlanStep{
 							{
-								ParentType:     "Query",
+								ParentType:     typeNameQuery,
 								InsertionPoint: []string{},
 								SelectionSet: ast.SelectionSet{
 									&ast.Field{
@@ -211,7 +215,7 @@ func TestExecutor_emptyPlansWithDependencies(t *testing.T) {
 									},
 								},
 								// return a known value we can test against
-								Queryer: &graphql.MockSuccessQueryer{map[string]interface{}{
+								Queryer: &graphql.MockSuccessQueryer{Value: map[string]interface{}{
 									"user": map[string]interface{}{
 										"id":        "1",
 										"firstName": "hello",
@@ -239,6 +243,7 @@ func TestExecutor_emptyPlansWithDependencies(t *testing.T) {
 }
 
 func TestExecutor_insertIntoFragmentSpread(t *testing.T) {
+	t.Parallel()
 	// the query we want to execute is
 	// {
 	//   photo {								<- Query.services @ serviceA
@@ -260,7 +265,7 @@ func TestExecutor_insertIntoFragmentSpread(t *testing.T) {
 				Then: []*QueryPlanStep{
 					// a query to satisfy photo.createdBy.firstName
 					{
-						ParentType:     "Query",
+						ParentType:     typeNameQuery,
 						InsertionPoint: []string{},
 						SelectionSet: ast.SelectionSet{
 							&ast.Field{
@@ -277,7 +282,7 @@ func TestExecutor_insertIntoFragmentSpread(t *testing.T) {
 								},
 							},
 						},
-						Queryer: &graphql.MockSuccessQueryer{map[string]interface{}{
+						Queryer: &graphql.MockSuccessQueryer{Value: map[string]interface{}{
 							"photo": map[string]interface{}{
 								"createdBy": map[string]interface{}{
 									"firstName": "John",
@@ -367,6 +372,7 @@ func TestExecutor_insertIntoFragmentSpread(t *testing.T) {
 }
 
 func TestExecutor_insertIntoListFragmentSpreads(t *testing.T) {
+	t.Parallel()
 	// {
 	// 	photos {								<-- Query.services @ serviceA, list
 	// 	  ...photosFragment
@@ -386,7 +392,7 @@ func TestExecutor_insertIntoListFragmentSpreads(t *testing.T) {
 				Then: []*QueryPlanStep{
 					// a query to satisfy photo.createdBy.firstName
 					{
-						ParentType:     "Query",
+						ParentType:     typeNameQuery,
 						InsertionPoint: []string{},
 						SelectionSet: ast.SelectionSet{
 							&ast.Field{
@@ -403,7 +409,7 @@ func TestExecutor_insertIntoListFragmentSpreads(t *testing.T) {
 								},
 							},
 						},
-						Queryer: &graphql.MockSuccessQueryer{map[string]interface{}{
+						Queryer: &graphql.MockSuccessQueryer{Value: map[string]interface{}{
 							"photos": []interface{}{
 								map[string]interface{}{
 									"createdBy": map[string]interface{}{
@@ -508,7 +514,152 @@ func TestExecutor_insertIntoListFragmentSpreads(t *testing.T) {
 	}, result)
 }
 
+func TestExecutor_insertIntoAliasedListFragmentSpreads(t *testing.T) {
+	t.Parallel()
+	//  {
+	//    gallery: photos{                       # <-- Query.photos @ serviceA, list
+	//      ...photosFragment
+	//    }
+	//  }
+	//  fragment photosFragment on Photo {
+	//    createdBy {
+	//      firstName                            # <-- User.firstName @ serviceA
+	//      address                              # <-- User.address @ serviceB
+	//    }
+	//  }
+
+	result, err := (&ParallelExecutor{}).Execute(&ExecutionContext{
+		logger:         &DefaultLogger{},
+		RequestContext: context.Background(),
+		Plan: &QueryPlan{
+			RootStep: &QueryPlanStep{
+				Then: []*QueryPlanStep{
+					// a query to satisfy photo.createdBy.firstName
+					{
+						ParentType:     typeNameQuery,
+						InsertionPoint: []string{},
+						SelectionSet: ast.SelectionSet{
+							&ast.Field{
+								Alias: "gallery",
+								Name:  "photos",
+								Definition: &ast.FieldDefinition{
+									Type: ast.ListType(ast.NamedType("Photo", &ast.Position{}), &ast.Position{}),
+								},
+								SelectionSet: ast.SelectionSet{
+									&ast.FragmentSpread{
+										Name:       "photosFragment",
+										Definition: nil,
+									},
+								},
+							},
+						},
+						Queryer: &graphql.MockSuccessQueryer{Value: map[string]interface{}{
+							"gallery": []interface{}{
+								map[string]interface{}{
+									"createdBy": map[string]interface{}{
+										"firstName": "John",
+										"id":        "1",
+									},
+								},
+								map[string]interface{}{
+									"createdBy": map[string]interface{}{
+										"firstName": "Jane",
+										"id":        "2",
+									},
+								},
+							},
+						}},
+						FragmentDefinitions: ast.FragmentDefinitionList{
+							&ast.FragmentDefinition{
+								Name:          "photosFragment",
+								TypeCondition: "Photo",
+								SelectionSet: ast.SelectionSet{
+									&ast.Field{
+										Name: "createdBy",
+										Definition: &ast.FieldDefinition{
+											Type: ast.NamedType("User", &ast.Position{}),
+										},
+										SelectionSet: ast.SelectionSet{
+											&ast.Field{
+												Name: "firstName",
+												Definition: &ast.FieldDefinition{
+													Type: ast.NamedType("String", &ast.Position{}),
+												},
+											},
+										},
+									},
+								},
+							},
+						},
+						Then: []*QueryPlanStep{
+							// a query to satisfy User.address
+							{
+								ParentType:     "User",
+								InsertionPoint: []string{"gallery", "createdBy"}, // photo is the query name here, but gallery is the alias
+								SelectionSet: ast.SelectionSet{
+									&ast.FragmentSpread{
+										Name: "photosFragment",
+									},
+								},
+								Queryer: graphql.QueryerFunc(
+									func(input *graphql.QueryInput) (interface{}, error) {
+										assert.Contains(t, []interface{}{"1", "2"}, input.Variables["id"])
+										return map[string]interface{}{
+											"node": map[string]interface{}{
+												"address": fmt.Sprintf("address-%s", input.Variables["id"]),
+											},
+										}, nil
+									},
+								),
+								FragmentDefinitions: ast.FragmentDefinitionList{
+									&ast.FragmentDefinition{
+										Name:          "photosFragment",
+										TypeCondition: "User",
+										SelectionSet: ast.SelectionSet{
+											&ast.Field{
+												Name:  "address",
+												Alias: "address",
+												Definition: &ast.FieldDefinition{
+													Name: "address",
+													Type: ast.NamedType("String", &ast.Position{}),
+												},
+											},
+										},
+									},
+								},
+							},
+						},
+					},
+				},
+			},
+		},
+	})
+	if err != nil {
+		t.Errorf("Encountered error execluting plan: %v", err.Error())
+		return
+	}
+	assert.Equal(t, map[string]interface{}{
+		"gallery": []interface{}{
+			map[string]interface{}{
+				"createdBy": map[string]interface{}{
+					"id":        "1",
+					"firstName": "John",
+					"address":   "address-1",
+				},
+			},
+			map[string]interface{}{
+				"createdBy": map[string]interface{}{
+					"id":        "2",
+					"firstName": "Jane",
+					"address":   "address-2",
+				},
+			},
+		},
+	}, result)
+}
+
 func TestExecutor_insertIntoFragmentSpreadLists(t *testing.T) {
+	t.Parallel()
 	// {
 	// 	photo {								<-- Query.services @ serviceA
 	// 	  ...photoFragment
@@ -528,7 +679,7 @@ func TestExecutor_insertIntoFragmentSpreadLists(t *testing.T) {
 				Then: []*QueryPlanStep{
 					// a query to satisfy photo.viewedBy.firstName
 					{
-						ParentType:     "Query",
+						ParentType:     typeNameQuery,
 						InsertionPoint: []string{},
 						SelectionSet: ast.SelectionSet{
 							&ast.Field{
@@ -545,7 +696,7 @@ func TestExecutor_insertIntoFragmentSpreadLists(t *testing.T) {
 								},
 							},
 						},
-						Queryer: &graphql.MockSuccessQueryer{map[string]interface{}{
+						Queryer: &graphql.MockSuccessQueryer{Value: map[string]interface{}{
 							"photo": map[string]interface{}{
 								"viewedBy": []interface{}{
 									map[string]interface{}{
@@ -647,6 +798,7 @@ func TestExecutor_insertIntoFragmentSpreadLists(t *testing.T) {
 }
 
 func TestExecutor_insertIntoInlineFragment(t *testing.T) {
+	t.Parallel()
 	// the query we want to execute is
 	// {
 	//   photo {								<- Query.services @ serviceA
@@ -666,7 +818,7 @@ func TestExecutor_insertIntoInlineFragment(t *testing.T) {
 				Then: []*QueryPlanStep{
 					// a query to satisfy photo.createdBy.firstName
 					{
-						ParentType:     "Query",
+						ParentType:     typeNameQuery,
 						InsertionPoint: []string{},
 						SelectionSet: ast.SelectionSet{
 							&ast.Field{
@@ -700,7 +852,7 @@ func TestExecutor_insertIntoInlineFragment(t *testing.T) {
 								},
 							},
 						},
-						Queryer: &graphql.MockSuccessQueryer{map[string]interface{}{
+						Queryer: &graphql.MockSuccessQueryer{Value: map[string]interface{}{
 							"photo": map[string]interface{}{
 								"createdBy": map[string]interface{}{
 									"firstName": "John",
@@ -756,6 +908,7 @@ func TestExecutor_insertIntoInlineFragment(t *testing.T) {
 }
 
 func TestExecutor_insertIntoListInlineFragments(t *testing.T) {
+	t.Parallel()
 	// {
 	// 	photos {								<-- Query.services @ serviceA, list
 	// 	  ... on Photo {
@@ -774,7 +927,7 @@ func TestExecutor_insertIntoListInlineFragments(t *testing.T) {
 				Then: []*QueryPlanStep{
 					// a query to satisfy photo.createdBy.firstName
 					{
-						ParentType:     "Query",
+						ParentType:     typeNameQuery,
 						InsertionPoint: []string{},
 						SelectionSet: ast.SelectionSet{
 							&ast.Field{
@@ -806,7 +959,7 @@ func TestExecutor_insertIntoListInlineFragments(t *testing.T) {
 								},
 							},
 						},
-						Queryer: &graphql.MockSuccessQueryer{map[string]interface{}{
+						Queryer: &graphql.MockSuccessQueryer{Value: map[string]interface{}{
 							"photos": []interface{}{
 								map[string]interface{}{
 									"createdBy": map[string]interface{}{
@@ -878,6 +1031,7 @@ func TestExecutor_insertIntoListInlineFragments(t *testing.T) {
 }
 
 func TestExecutor_insertIntoInlineFragmentsList(t *testing.T) {
+	t.Parallel()
 	// {
 	// 	photo {								<-- Query.services @ serviceA
 	// 	  ... on Photo {
@@ -896,7 +1050,7 @@ func TestExecutor_insertIntoInlineFragmentsList(t *testing.T) {
 				Then: []*QueryPlanStep{
 					// a query to satisfy photo.viewedBy.firstName
 					{
-						ParentType:     "Query",
+						ParentType:     typeNameQuery,
 						InsertionPoint: []string{},
 						SelectionSet: ast.SelectionSet{
 							&ast.Field{
@@ -928,7 +1082,7 @@ func TestExecutor_insertIntoInlineFragmentsList(t *testing.T) {
 								},
 							},
 						},
-						Queryer: &graphql.MockSuccessQueryer{map[string]interface{}{
+						Queryer: &graphql.MockSuccessQueryer{Value: map[string]interface{}{
 							"photo": map[string]interface{}{
 								"viewedBy": []interface{}{
 									map[string]interface{}{
@@ -993,10 +1147,10 @@ func TestExecutor_insertIntoInlineFragmentsList(t *testing.T) {
 			},
 		},
 	}, result)
-
 }
 
 func TestExecutor_insertIntoLists(t *testing.T) {
+	t.Parallel()
 	// the query we want to execute is
 	// {
 	// 		users {                  	<- Query.services @ serviceA
@@ -1025,7 +1179,7 @@ func TestExecutor_insertIntoLists(t *testing.T) {
 			RootStep: &QueryPlanStep{
 				Then: []*QueryPlanStep{
 					{
-						ParentType:     "Query",
+						ParentType:     typeNameQuery,
 						InsertionPoint: []string{},
 						SelectionSet: ast.SelectionSet{
 							&ast.Field{
@@ -1059,7 +1213,7 @@ func TestExecutor_insertIntoLists(t *testing.T) {
 						},
 						// planner will actually leave behind a queryer that hits service A
 						// for testing we can just return a known value
-						Queryer: &graphql.MockSuccessQueryer{map[string]interface{}{
+						Queryer: &graphql.MockSuccessQueryer{Value: map[string]interface{}{
 							"users": []interface{}{
 								map[string]interface{}{
 									"firstName": "hello",
@@ -1120,7 +1274,7 @@ func TestExecutor_insertIntoLists(t *testing.T) {
 								},
 								// planner will actually leave behind a queryer that hits service B
 								// for testing we can just return a known value
-								Queryer: &graphql.MockSuccessQueryer{map[string]interface{}{
+								Queryer: &graphql.MockSuccessQueryer{Value: map[string]interface{}{
 									"node": map[string]interface{}{
 										"photoGallery": []interface{}{
 											map[string]interface{}{
@@ -1254,7 +1408,270 @@ func TestExecutor_insertIntoLists(t *testing.T) {
 	}, result)
 }
 
+func TestExecutor_insertIntoAliasedLists(t *testing.T) {
+	t.Parallel()
+	// the query we want to execute is
+	// {
+	//   users {                         # <- Query.users @ serviceA
+	//     firstName
+	//     mates: friends {              # <- list
+	//       firstName
+	//       collection: photoGallery {  # <- list, User.photoGallery @ serviceB
+	//         url
+	//         fellows: followers {      # <- list
+	//           firstName               # <- User.firstName @ serviceA
+	//         }
+	//       }
+	//     }
+	//   }
+	// }
+
+	// values to test against
+	photoGalleryURL := "photoGalleryURL"
+	followerName := "John"
+
+	// build a query plan that the executor will follow
+	result, err := (&ParallelExecutor{}).Execute(&ExecutionContext{
+		logger:         &DefaultLogger{},
+		RequestContext: context.Background(),
+		Plan: &QueryPlan{
+			RootStep: &QueryPlanStep{
+				Then: []*QueryPlanStep{
+					{
+						ParentType:     typeNameQuery,
+						InsertionPoint: []string{},
+						SelectionSet: ast.SelectionSet{
+							&ast.Field{
+								Name: "users",
+								Definition: &ast.FieldDefinition{
+									Type: ast.ListType(ast.NamedType("User", &ast.Position{}), &ast.Position{}),
+								},
+								SelectionSet: ast.SelectionSet{
+									&ast.Field{
+										Name: "firstName",
+										Definition: &ast.FieldDefinition{
+											Type: ast.NamedType("String", &ast.Position{}),
+										},
+									},
+									&ast.Field{
+										Alias: "mates",
+										Name:  "friends",
+										Definition: &ast.FieldDefinition{
+											Type: ast.ListType(ast.NamedType("User", &ast.Position{}), &ast.Position{}),
+										},
+										SelectionSet: ast.SelectionSet{
+											&ast.Field{
+												Definition: &ast.FieldDefinition{
+													Type: ast.NamedType("String", &ast.Position{}),
+												},
+												Name: "firstName",
+											},
+										},
+									},
+								},
+							},
+						},
+						// planner will actually leave behind a queryer that hits service A
+						// for testing we can just return a known value
+						Queryer: &graphql.MockSuccessQueryer{Value: map[string]interface{}{
+							"users": []interface{}{
+								map[string]interface{}{
+									"firstName": "hello",
+									"mates": []interface{}{
+										map[string]interface{}{
+											"firstName": "John",
+											"id":        "1",
+										},
+										map[string]interface{}{
+											"firstName": "Jacob",
+											"id":        "2",
+										},
+									},
+								},
+								map[string]interface{}{
+									"firstName": "goodbye",
+									"mates": []interface{}{
+										map[string]interface{}{
+											"firstName": "Jingleheymer",
+											"id":        "3",
+										},
+										map[string]interface{}{
+											"firstName": "Schmidt",
+											"id":        "4",
+										},
+									},
+								},
+							},
+						}},
+						// then we have to ask for the users photo gallery
+						Then: []*QueryPlanStep{
+							// a query to satisfy User.photoGallery
+							{
+								ParentType:     "User",
+								InsertionPoint: []string{"users", "mates"},
+								SelectionSet: ast.SelectionSet{
+									&ast.Field{
+										Alias: "collection",
+										Name:  "photoGallery",
+										Definition: &ast.FieldDefinition{
+											Type: ast.ListType(ast.NamedType("CatPhoto", &ast.Position{}), &ast.Position{}),
+										},
+										SelectionSet: ast.SelectionSet{
+											&ast.Field{
+												Name: "url",
+												Definition: &ast.FieldDefinition{
+													Type: ast.NamedType("String", &ast.Position{}),
+												},
+											},
+											&ast.Field{
+												Alias: "fellows",
+												Name:  "followers",
+												Definition: &ast.FieldDefinition{
+													Type: ast.NamedType("User", &ast.Position{}),
+												},
+												SelectionSet: ast.SelectionSet{},
+											},
+										},
+									},
+								},
+								// planner will actually leave behind a queryer that hits service B
+								// for testing we can just return a known value
+								Queryer: &graphql.MockSuccessQueryer{Value: map[string]interface{}{
+									"node": map[string]interface{}{
+										"collection": []interface{}{
+											map[string]interface{}{
+												"url": photoGalleryURL,
+												"fellows": []interface{}{
+													map[string]interface{}{
+														"id": "1",
+													},
+												},
+											},
+										},
+									},
+								}},
+								Then: []*QueryPlanStep{
+									// a query to satisfy User.firstName
+									{
+										ParentType:     "User",
+										InsertionPoint: []string{"users", "mates", "collection", "fellows"},
+										SelectionSet: ast.SelectionSet{
+											&ast.Field{
+												Name: "firstName",
+												Definition: &ast.FieldDefinition{
+													Type: ast.NamedType("String", &ast.Position{}),
+												},
+											},
+										},
+										// planner will actually leave behind a queryer that hits service B
+										// for testing we can just return a known value
+										Queryer: graphql.QueryerFunc(
+											func(input *graphql.QueryInput) (interface{}, error) {
+												// make sure that we got the right variable inputs
+												assert.Equal(t, map[string]interface{}{"id": "1"}, input.Variables)
+
+												// return the payload
+												return map[string]interface{}{
+													"node": map[string]interface{}{
+														"firstName": followerName,
+													},
+												}, nil
+											},
+										),
+									},
+								},
+							},
+						},
+					},
+				},
+			},
+		},
+	})
+	if err != nil {
+		t.Errorf("Encountered error executing plan: %v", err.Error())
+		return
+	}
+
+	// atm the mock queryer always returns the same value so we will end up with
+	// the same User.favoritePhoto and User.photoGallery
+	assert.Equal(t, map[string]interface{}{
+		"users": []interface{}{
+			map[string]interface{}{
+				"firstName": "hello",
+				"mates": []interface{}{
+					map[string]interface{}{
+						"firstName": "John",
+						"id":        "1",
+						"collection": []interface{}{
+							map[string]interface{}{
+								"url": photoGalleryURL,
+								"fellows": []interface{}{
+									map[string]interface{}{
+										"id":        "1",
+										"firstName": followerName,
+									},
+								},
+							},
+						},
+					},
+					map[string]interface{}{
+						"firstName": "Jacob",
+						"id":        "2",
+						"collection": []interface{}{
+							map[string]interface{}{
+								"url": photoGalleryURL,
+								"fellows": []interface{}{
+									map[string]interface{}{
+										"id":        "1",
+										"firstName": followerName,
+									},
+								},
+							},
+						},
+					},
+				},
+			},
+			map[string]interface{}{
+				"firstName": "goodbye",
+				"mates": []interface{}{
+					map[string]interface{}{
+						"firstName": "Jingleheymer",
+						"id":        "3",
+						"collection": []interface{}{
+							map[string]interface{}{
+								"url": photoGalleryURL,
+								"fellows": []interface{}{
+									map[string]interface{}{
+										"id":        "1",
+										"firstName": followerName,
+									},
+								},
+							},
+						},
+					},
+					map[string]interface{}{
+						"firstName": "Schmidt",
+						"id":        "4",
+						"collection": []interface{}{
+							map[string]interface{}{
+								"url": photoGalleryURL,
+								"fellows": []interface{}{
+									map[string]interface{}{
+										"id":        "1",
+										"firstName": followerName,
+									},
+								},
+							},
+						},
+					},
+				},
+			},
+		},
+	}, result)
+}
+
 func TestExecutor_multipleErrors(t *testing.T) {
+	t.Parallel()
 	// an executor should return a list of every error that it encounters while executing the plan
 
 	// build a query plan that the executor will follow
@@ -1267,7 +1684,7 @@ func TestExecutor_multipleErrors(t *testing.T) {
 					{
 						// this is equivalent to
 						// query { values }
-						ParentType: "Query",
+						ParentType: typeNameQuery,
 						SelectionSet: ast.SelectionSet{
 							&ast.Field{
 								Name: "values",
@@ -1278,7 +1695,7 @@ func TestExecutor_multipleErrors(t *testing.T) {
 						},
 						// return a known value we can test against
 						Queryer: graphql.QueryerFunc(
-							func(input *graphql.QueryInput) (interface{}, error) {
+							func(*graphql.QueryInput) (interface{}, error) {
 								return map[string]interface{}{"data": map[string]interface{}{}}, errors.New("message")
 							},
 						),
@@ -1286,7 +1703,7 @@ func TestExecutor_multipleErrors(t *testing.T) {
 					{
 						// this is equivalent to
 						// query { values }
-						ParentType: "Query",
+						ParentType: typeNameQuery,
 						SelectionSet: ast.SelectionSet{
 							&ast.Field{
 								Name: "values",
@@ -1297,7 +1714,7 @@ func TestExecutor_multipleErrors(t *testing.T) {
 						},
 						// return a known value we can test against
 						Queryer: graphql.QueryerFunc(
-							func(input *graphql.QueryInput) (interface{}, error) {
+							func(*graphql.QueryInput) (interface{}, error) {
 								return map[string]interface{}{"data": map[string]interface{}{}}, graphql.ErrorList{errors.New("message"), errors.New("message")}
 							},
 						),
@@ -1312,8 +1729,8 @@ func TestExecutor_multipleErrors(t *testing.T) {
 	}
 
 	// since 3 errors were thrown we need to make sure we actually received an error list
-	list, ok := err.(graphql.ErrorList)
-	if !ok {
+	var list graphql.ErrorList
+	if !errors.As(err, &list) {
 		t.Error("Error was not an error list")
 		return
 	}
@@ -1324,6 +1741,7 @@ func TestExecutor_multipleErrors(t *testing.T) {
 }
 
 func TestExecutor_includeIf(t *testing.T) {
+	t.Parallel()
 
 	// the query we want to execute is
 	// {
@@ -1342,10 +1760,9 @@ func TestExecutor_includeIf(t *testing.T) {
 			RootStep: &QueryPlanStep{
 				Then: []*QueryPlanStep{
 					{
-
 						// this is equivalent to
 						// query { user }
-						ParentType:     "Query",
+						ParentType:     typeNameQuery,
 						InsertionPoint: []string{},
 						SelectionSet: ast.SelectionSet{
 							&ast.Field{
@@ -1378,7 +1795,7 @@ func TestExecutor_includeIf(t *testing.T) {
 							},
 						},
 						// return a known value we can test against
-						Queryer: &graphql.MockSuccessQueryer{map[string]interface{}{}},
+						Queryer: &graphql.MockSuccessQueryer{Value: map[string]interface{}{}},
 						// then we have to ask for the users favorite cat photo and its url
 						Then: []*QueryPlanStep{
 							{
@@ -1400,7 +1817,7 @@ func TestExecutor_includeIf(t *testing.T) {
 										},
 									},
 								},
-								Queryer: &graphql.MockSuccessQueryer{map[string]interface{}{
+								Queryer: &graphql.MockSuccessQueryer{Value: map[string]interface{}{
 									"node": map[string]interface{}{
 										"favoriteCatPhoto": map[string]interface{}{
 											"url": "hello world",
@@ -1423,6 +1840,7 @@ func TestExecutor_includeIf(t *testing.T) {
 }
 
 func TestExecutor_appliesRequestMiddlewares(t *testing.T) {
+	t.Parallel()
 	schema, _ := graphql.LoadSchema(
 		`
 			type Query {
@@ -1438,7 +1856,7 @@ func TestExecutor_appliesRequestMiddlewares(t *testing.T) {
 
 	// the middleware to apply
 	called := false
-	middleware := RequestMiddleware(func(r *http.Request) error {
+	middleware := RequestMiddleware(func(*http.Request) error {
 		called = true
 		return nil
 	})
@@ -1446,7 +1864,7 @@ func TestExecutor_appliesRequestMiddlewares(t *testing.T) {
 	// in order to execute the request middleware we need to be dealing with a network queryer
 	// which means we need to fake out the http client
 	httpClient := &http.Client{
-		Transport: roundTripFunc(func(req *http.Request) *http.Response {
+		Transport: roundTripFunc(func(*http.Request) *http.Response {
 			// serialize the json we want to send back
 			result, _ := json.Marshal(map[string]interface{}{
 				"allUsers": []string{
@@ -1458,7 +1876,7 @@ func TestExecutor_appliesRequestMiddlewares(t *testing.T) {
 			return &http.Response{
 				StatusCode: 200,
 				// Send response to be tested
-				Body: ioutil.NopCloser(bytes.NewBuffer(result)),
+				Body: io.NopCloser(bytes.NewBuffer(result)),
 				// Must be set to non-nil value or it panics
 				Header: make(http.Header),
 			}
@@ -1477,7 +1895,7 @@ func TestExecutor_appliesRequestMiddlewares(t *testing.T) {
 						{
 							// this is equivalent to
 							// query { values }
-							ParentType: "Query",
+							ParentType: typeNameQuery,
 							SelectionSet: ast.SelectionSet{
 								&ast.Field{
 									Name: "values",
@@ -1489,7 +1907,7 @@ func TestExecutor_appliesRequestMiddlewares(t *testing.T) {
 							QueryDocument: &ast.QueryDocument{
 								Operations: ast.OperationList{
 									{
-										Operation: "Query",
+										Operation: typeNameQuery,
 									},
 								},
 							},
@@ -1517,13 +1935,15 @@ func TestExecutor_appliesRequestMiddlewares(t *testing.T) {
 	plan, _ := gateway.GetPlans(reqCtx)
 
 	// execute any think
-	gateway.Execute(reqCtx, plan)
+	_, err = gateway.Execute(reqCtx, plan)
+	assert.NoError(t, err)
 
 	// make sure we called the middleware
 	assert.True(t, called, "Did not call middleware")
 }
 
 func TestExecutor_threadsVariables(t *testing.T) {
+	t.Parallel()
 	// the variables we'll be threading through
 	fullVariables := map[string]interface{}{
 		"hello":   "world",
@@ -1558,7 +1978,7 @@ func TestExecutor_threadsVariables(t *testing.T) {
 					{
 						// this is equivalent to
 						// query { values }
-						ParentType: "Query",
+						ParentType: typeNameQuery,
 						SelectionSet: ast.SelectionSet{
 							&ast.Field{
 								Name: "values",
@@ -1570,7 +1990,7 @@ func TestExecutor_threadsVariables(t *testing.T) {
 						QueryDocument: &ast.QueryDocument{
 							Operations: ast.OperationList{
 								{
-									Operation:           "Query",
+									Operation:           typeNameQuery,
 									VariableDefinitions: ast.VariableDefinitionList{fullVariableDefs[0]},
 								},
 							},
@@ -1599,7 +2019,9 @@ func TestExecutor_threadsVariables(t *testing.T) {
 		t.Error(err.Error())
 	}
 }
+
 func TestFindInsertionPoint_rootList(t *testing.T) {
+	t.Parallel()
 	// in this example, the step before would have just resolved (need to be inserted at)
 	// ["users", "photoGallery"]. There would be an id field underneath each photo in the list
 	// of users.photoGallery
@@ -1664,7 +2086,7 @@ func TestFindInsertionPoint_rootList(t *testing.T) {
 	}
 
 	// the result of the step
-	result := map[string]interface{}{
+	result := execresult.NewObjectFromMap(map[string]interface{}{
 		"users": []interface{}{
 			map[string]interface{}{
 				"photoGallery": []interface{}{
@@ -1710,20 +2132,22 @@ func TestFindInsertionPoint_rootList(t *testing.T) {
 				},
 			},
 		},
-	}
+	})
 
-	generatedPoint, err := executorFindInsertionPoints(&ExecutionContext{logger: &DefaultLogger{}}, &sync.Mutex{}, planInsertionPoint, stepSelectionSet, result, startingPoint, nil)
+	generatedPoint, missingIDPoints, err := executorFindInsertionPoints(&ExecutionContext{logger: &DefaultLogger{}}, planInsertionPoint, stepSelectionSet, result, startingPoint, nil)
 	if err != nil {
 		t.Error(t, err)
 		return
 	}
 
 	assert.Equal(t, finalInsertionPoint, generatedPoint)
+	assert.Empty(t, missingIDPoints)
 }
 
 func TestFindObject(t *testing.T) {
+	t.Parallel()
 	// create an object we want to extract
-	source := map[string]interface{}{
+	source := execresult.NewObjectFromMap(map[string]interface{}{
 		"hello": []interface{}{
 			map[string]interface{}{
 				"firstName": "0",
@@ -1768,9 +2192,9 @@ func TestFindObject(t *testing.T) {
 				},
 			},
 		},
-	}
+	})
 
-	value, err := executorExtractValue(&ExecutionContext{logger: &DefaultLogger{}}, source, &sync.Mutex{}, []string{"hello:0", "friends:1", "friends:0"})
+	value, err := executorExtractValue(&ExecutionContext{logger: &DefaultLogger{}}, source, []string{"hello:0", "friends:1", "friends:0"})
 	if err != nil {
 		t.Error(err.Error())
 		return
@@ -1778,176 +2202,134 @@ func TestFindObject(t *testing.T) {
 
 	assert.Equal(t, map[string]interface{}{
 		"firstName": "Hello2",
-	}, value)
+	}, value.ToMap())
 }
 
-func TestFindString(t *testing.T) {
+func TestFindNull(t *testing.T) {
+	t.Parallel()
 	// create an object we want to extract
-	source := map[string]interface{}{
-		"hello": []interface{}{
-			map[string]interface{}{
-				"firstName": "0",
-				"friends": []interface{}{
-					map[string]interface{}{
-						"firstName": "2",
-					},
-					map[string]interface{}{
-						"firstName": "3",
-					},
-				},
-			},
-			map[string]interface{}{
-				"firstName": "4",
-				"friends": []interface{}{
-					map[string]interface{}{
-						"firstName": "5",
-					},
-					map[string]interface{}{
-						"firstName": "6",
-					},
-				},
-			},
+	source := execresult.NewObjectFromMap(map[string]any{
+		"foo": map[string]any{
+			"bar": nil,
 		},
-	}
+	})
 
-	value, err := executorExtractValue(&ExecutionContext{logger: &DefaultLogger{}}, source, &sync.Mutex{}, []string{"hello:0", "friends:1", "firstName"})
-	if err != nil {
-		t.Error(err.Error())
-		return
-	}
+	value, err := executorExtractValue(&ExecutionContext{logger: &DefaultLogger{}}, source, []string{"foo", "bar"})
+	require.NoError(t, err)
 
-	assert.Equal(t, "3", value)
+	weakObj := execresult.NewObject()
+	weakObj.SetWeak()
+	assert.Equal(t, weakObj, value)
+	assert.Equal(t, map[string]any(nil), value.ToMap())
 }
 
 func TestExecutorInsertObject_insertObjectValues(t *testing.T) {
+	t.Parallel()
 	// the object to mutate
-	source := map[string]interface{}{}
+	source := execresult.NewObject()
 
 	// the object to insert
 	inserted := map[string]interface{}{"hello": "world"}
+	insertedObj := execresult.NewObjectFromMap(inserted)
 
 	// insert the string deeeeep down
-	err := executorInsertObject(&ExecutionContext{logger: &DefaultLogger{}}, source, &sync.Mutex{}, []string{"hello:5#1", "message", "body:2"}, inserted)
+	err := executorInsertObject(&ExecutionContext{logger: &DefaultLogger{}}, source, []string{"hello:5#1", "message", "body:2"}, insertedObj)
 	if err != nil {
 		t.Error(err)
 		return
 	}
 
 	// there should be a list under the key "hello"
-	rootList, ok := source["hello"]
+	list, ok := source.GetList("hello")
 	if !ok {
 		t.Error("Did not add root list")
 		return
 	}
-	list, ok := rootList.([]interface{})
-	if !ok {
-		t.Error("root list is not a list")
-		return
-	}
 
-	if len(list) != 6 {
+	if list.Length() != 6 {
 		t.Errorf("Root list did not have enough entries.")
-		assert.Equal(t, 6, len(list))
+		assert.Equal(t, 6, list.Length())
 		return
 	}
 
-	entry, ok := list[5].(map[string]interface{})
+	entry, ok := list.GetObjectAtIndex(5)
 	if !ok {
 		t.Error("6th entry wasn't an object")
 		return
 	}
 
 	// the object we care about is index 5
-	message := entry["message"]
-	if message == nil {
+	message, ok := entry.GetObject("message")
+	if message == nil || !ok {
 		t.Error("Did not add message to object")
 		return
 	}
 
-	msgObj, ok := message.(map[string]interface{})
-	if !ok {
-		t.Error("message is not a list")
-		return
-	}
-
 	// there should be a list under it called body
-	bodiesList, ok := msgObj["body"]
+	bodies, ok := message.GetList("body")
 	if !ok {
 		t.Error("Did not add body list")
 		return
 	}
-	bodies, ok := bodiesList.([]interface{})
-	if !ok {
-		t.Error("bodies list is not a list")
-		return
-	}
 
-	if len(bodies) != 3 {
+	if bodies.Length() != 3 {
 		t.Error("bodies list did not have enough entries")
 		return
 	}
-	body, ok := bodies[2].(map[string]interface{})
+	body, ok := bodies.GetObjectAtIndex(2)
 	if !ok {
 		t.Error("Body was not an object")
 		return
 	}
 
 	// make sure that the value is what we expect
-	assert.Equal(t, inserted, body)
+	assert.Equal(t, inserted, body.ToMap())
 }
 
 func TestExecutorInsertObject_insertListElements(t *testing.T) {
+	t.Parallel()
 	// the object to mutate
-	source := map[string]interface{}{}
+	source := execresult.NewObject()
 
 	// the object to insert
 	inserted := map[string]interface{}{
 		"hello": "world",
 	}
+	insertedObj := execresult.NewObjectFromMap(inserted)
 
 	// insert the object deeeeep down
-	err := executorInsertObject(&ExecutionContext{logger: &DefaultLogger{}}, source, &sync.Mutex{}, []string{"hello", "objects:5"}, inserted)
+	err := executorInsertObject(&ExecutionContext{logger: &DefaultLogger{}}, source, []string{"hello", "objects:5"}, insertedObj)
 	if err != nil {
 		t.Error(err)
 		return
 	}
 
 	// there should be an object under the key "hello"
-	rootEntry, ok := source["hello"]
+	root, ok := source.GetObject("hello")
 	if !ok {
 		t.Error("Did not add root entry")
 		return
 	}
 
-	root, ok := rootEntry.(map[string]interface{})
-	if !ok {
-		t.Error("root object is not an object")
-		return
-	}
-
-	rootList, ok := root["objects"]
+	list, ok := root.GetList("objects")
 	if !ok {
 		t.Error("did not add objects list")
 		return
 	}
 
-	list, ok := rootList.([]interface{})
-	if !ok {
-		t.Error("objects is not a list")
-		return
-	}
-
-	if len(list) != 6 {
+	if list.Length() != 6 {
 		t.Errorf("Root list did not have enough entries.")
-		assert.Equal(t, 6, len(list))
+		assert.Equal(t, 6, list.Length())
 		return
 	}
 
 	// make sure that the value is what we expect
-	assert.Equal(t, inserted, list[5])
+	actualInserted, _ := list.GetObjectAtIndex(5)
+	assert.Equal(t, inserted, actualInserted.ToMap())
 }
 
 func TestExecutorGetPointData(t *testing.T) {
+	t.Parallel()
 	table := []struct {
 		point string
 		data  *extractorPointData
@@ -1961,6 +2343,7 @@ func TestExecutorGetPointData(t *testing.T) {
 
 	for _, row := range table {
 		t.Run(row.point, func(t *testing.T) {
+			t.Parallel()
 			pointData, err := executorGetPointData(row.point)
 			if err != nil {
 				t.Error(err.Error())
@@ -1973,15 +2356,15 @@ func TestExecutorGetPointData(t *testing.T) {
 }
 
 func TestFindInsertionPoint_bailOnNil(t *testing.T) {
+	t.Parallel()
 	// we want the list of insertion points that point to
 	planInsertionPoint := []string{"post", "author"}
-	expected := [][]string{}
 
-	result := map[string]interface{}{
+	result := execresult.NewObjectFromMap(map[string]interface{}{
 		"post": map[string]interface{}{
 			"author": nil,
 		},
-	}
+	})
 
 	// the selection we're going to make
 	stepSelectionSet := ast.SelectionSet{
@@ -2001,16 +2384,18 @@ func TestFindInsertionPoint_bailOnNil(t *testing.T) {
 		},
 	}
 
-	generatedPoint, err := executorFindInsertionPoints(&ExecutionContext{logger: &DefaultLogger{}}, &sync.Mutex{}, planInsertionPoint, stepSelectionSet, result, [][]string{}, nil)
+	generatedPoint, missingIDPoints, err := executorFindInsertionPoints(&ExecutionContext{logger: &DefaultLogger{}}, planInsertionPoint, stepSelectionSet, result, [][]string{}, nil)
 	if err != nil {
 		t.Error(t, err)
 		return
 	}
 
-	assert.Equal(t, expected, generatedPoint)
+	assert.Empty(t, generatedPoint)
+	assert.Empty(t, missingIDPoints)
 }
 
 func TestFindInsertionPoint_stitchIntoObject(t *testing.T) {
+	t.Parallel()
 	// we want the list of insertion points that point to
 	planInsertionPoint := []string{"users", "photoGallery", "author"}
 
@@ -2057,7 +2442,7 @@ func TestFindInsertionPoint_stitchIntoObject(t *testing.T) {
 	}
 
 	// the result of the step
-	result := map[string]interface{}{
+	result := execresult.NewObjectFromMap(map[string]interface{}{
 		"photoGallery": []interface{}{
 			map[string]interface{}{
 				"author": map[string]interface{}{
@@ -2075,30 +2460,27 @@ func TestFindInsertionPoint_stitchIntoObject(t *testing.T) {
 				},
 			},
 		},
-	}
+	})
 
-	generatedPoint, err := executorFindInsertionPoints(&ExecutionContext{logger: &DefaultLogger{}}, &sync.Mutex{}, planInsertionPoint, stepSelectionSet, result, startingPoint, nil)
+	generatedPoint, missingIDPoints, err := executorFindInsertionPoints(&ExecutionContext{logger: &DefaultLogger{}}, planInsertionPoint, stepSelectionSet, result, startingPoint, nil)
 	if err != nil {
 		t.Error(t, err)
 		return
 	}
 
 	assert.Equal(t, finalInsertionPoint, generatedPoint)
-}
-
-func TestFindInsertionPoint_handlesNullObjects(t *testing.T) {
-	t.Skip("Not yet implemented")
+	assert.Empty(t, missingIDPoints)
 }
 
 func TestSingleObjectWithColonInID(t *testing.T) {
-	var source = make(map[string]interface{})
+	t.Parallel()
+	source := make(map[string]interface{})
 	_ = json.Unmarshal([]byte(
-		// language=JSON
 		`{"hello": {"id": "Thing:1337", "firstName": "Foo", "lastName": "bar"}}`),
 		&source,
 	)
 
-	value, err := executorExtractValue(&ExecutionContext{logger: &DefaultLogger{}}, source, &sync.Mutex{}, []string{"hello#Thing:1337"})
+	value, err := executorExtractValue(&ExecutionContext{logger: &DefaultLogger{}}, execresult.NewObjectFromMap(source), []string{"hello#Thing:1337"})
 	if err != nil {
 		t.Error(err.Error())
 		return
@@ -2106,13 +2488,14 @@ func TestSingleObjectWithColonInID(t *testing.T) {
 
 	assert.Equal(t, map[string]interface{}{
 		"id": "Thing:1337", "firstName": "Foo", "lastName": "bar",
-	}, value)
+	}, value.ToMap())
 }
 
 // TestExecutor_plansWithManyDeepDependencies test that two `Then` works without races
 // Test provides quite deep query to illustrate problem with
 // reused memory during slice `appends`
 func TestExecutor_plansWithManyDeepDependencies(t *testing.T) {
+	t.Parallel()
 
 	// the query we want to execute is
 	//	{
@@ -2158,7 +2541,7 @@ func TestExecutor_plansWithManyDeepDependencies(t *testing.T) {
 			RootStep: &QueryPlanStep{
 				Then: []*QueryPlanStep{
 					{
-						ParentType:     "Query",
+						ParentType:     typeNameQuery,
 						InsertionPoint: []string{},
 						SelectionSet: ast.SelectionSet{
 							&ast.Field{
@@ -2182,7 +2565,7 @@ func TestExecutor_plansWithManyDeepDependencies(t *testing.T) {
 							},
 						},
 						Queryer: &graphql.MockSuccessQueryer{
-							map[string]interface{}{
+							Value: map[string]interface{}{
 								"user": map[string]interface{}{
 									"parent": map[string]interface{}{
 										"parent": map[string]interface{}{
@@ -2213,7 +2596,7 @@ func TestExecutor_plansWithManyDeepDependencies(t *testing.T) {
 									},
 								},
 								Queryer: &graphql.MockSuccessQueryer{
-									map[string]interface{}{"node": map[string]interface{}{
+									Value: map[string]interface{}{"node": map[string]interface{}{
 										"house": map[string]interface{}{
 											"id": "2",
 											"cats": []interface{}{
@@ -2233,12 +2616,13 @@ func TestExecutor_plansWithManyDeepDependencies(t *testing.T) {
 												Definition: definitionFactory("String"),
 											},
 										},
-										Queryer: &graphql.MockSuccessQueryer{map[string]interface{}{
+										Queryer: &graphql.MockSuccessQueryer{Value: map[string]interface{}{
 											"node": map[string]interface{}{
 												"id":      "2",
 												"address": "Cats street",
 											},
-										}}},
+										}},
+									},
 									{
 										ParentType:     "User",
 										InsertionPoint: []string{"user", "parent", "parent", "house", "cats"},
@@ -2249,10 +2633,12 @@ func TestExecutor_plansWithManyDeepDependencies(t *testing.T) {
 												Definition: definitionFactory("String"),
 											},
 										},
-										Queryer: &graphql.MockSuccessQueryer{map[string]interface{}{
-											"node": map[string]interface{}{
-												"id": "3", "name": "kitty",
-											}},
+										Queryer: &graphql.MockSuccessQueryer{
+											Value: map[string]interface{}{
+												"node": map[string]interface{}{
+													"id": "3", "name": "kitty",
+												},
+											},
 										},
 									},
 								},

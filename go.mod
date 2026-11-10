@@ -1,17 +1,24 @@
 module github.com/nautilus/gateway
 
+go 1.25.0
+
 require (
-	github.com/99designs/gqlgen v0.13.0
-	github.com/agnivade/levenshtein v1.1.0 // indirect
-	github.com/mitchellh/mapstructure v1.4.1
-	github.com/nautilus/graphql v0.0.17
-	github.com/opentracing/opentracing-go v1.2.0 // indirect
-	github.com/sirupsen/logrus v1.7.0
-	github.com/stretchr/testify v1.6.1
-	github.com/vektah/gqlparser/v2 v2.1.0
-	golang.org/x/net v0.0.0-20201002202402-0a1ea396d57c
-	golang.org/x/sys v0.0.0-20201005172224-997123666555 // indirect
-	gopkg.in/yaml.v2 v2.3.0 // indirect
+	github.com/99designs/gqlgen v0.17.15
+	github.com/go-viper/mapstructure/v2 v2.4.0
+	github.com/nautilus/graphql v0.0.27
+	github.com/pkg/errors v0.9.1
+	github.com/sirupsen/logrus v1.9.3
+	github.com/stretchr/testify v1.9.0
+	github.com/vektah/gqlparser/v2 v2.5.16
+	golang.org/x/net v0.55.0
 )
 
-go 1.13
+require (
+	github.com/agnivade/levenshtein v1.1.1 // indirect
+	github.com/davecgh/go-spew v1.1.1 // indirect
+	github.com/graph-gophers/dataloader v5.0.0+incompatible // indirect
+	github.com/opentracing/opentracing-go v1.2.0 // indirect
+	github.com/pmezard/go-difflib v1.0.0 // indirect
+	golang.org/x/sys v0.45.0 // indirect
+	gopkg.in/yaml.v3 v3.0.1 // indirect
+)

@@ -2,12 +2,18 @@ package gateway
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
+	"fmt"
+	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 
 	"github.com/nautilus/graphql"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+	"github.com/vektah/gqlparser/v2"
 	"github.com/vektah/gqlparser/v2/ast"
 )
 
@@ -17,6 +23,7 @@ type schemaTableRow struct {
 }
 
 func TestGateway(t *testing.T) {
+	t.Parallel()
 	schemas := []schemaTableRow{
 		{
 			"url1",
@@ -53,9 +60,10 @@ func TestGateway(t *testing.T) {
 	}
 
 	t.Run("Compute Field URLs", func(t *testing.T) {
+		t.Parallel()
 		locations := fieldURLs(sources, false)
 
-		allUsersURL, err := locations.URLFor("Query", "allUsers")
+		allUsersURL, err := locations.URLFor(typeNameQuery, "allUsers")
 		assert.Nil(t, err)
 		assert.Equal(t, []string{"url1"}, allUsersURL)
 
@@ -82,11 +90,11 @@ func TestGateway(t *testing.T) {
 	})
 
 	t.Run("Options", func(t *testing.T) {
+		t.Parallel()
 		// create a new schema with the sources and some configuration
 		gateway, err := New([]*graphql.RemoteSchema{sources[0]}, func(schema *Gateway) {
 			schema.sources = append(schema.sources, sources[1])
 		})
-
 		if err != nil {
 			t.Error(err.Error())
 			return
@@ -97,6 +105,7 @@ func TestGateway(t *testing.T) {
 	})
 
 	t.Run("WithPlanner", func(t *testing.T) {
+		t.Parallel()
 		// the planner we will assign
 		planner := &MockPlanner{}
 
@@ -110,10 +119,11 @@ func TestGateway(t *testing.T) {
 	})
 
 	t.Run("WithQueryerFactory", func(t *testing.T) {
+		t.Parallel()
 		// the planner we will assign
 		planner := &MinQueriesPlanner{}
 
-		factory := QueryerFactory(func(ctx *PlanningContext, url string) graphql.Queryer {
+		factory := QueryerFactory(func(ctx *PlanningContext, _ string) graphql.Queryer {
 			return ctx.Gateway
 		})
 
@@ -128,6 +138,7 @@ func TestGateway(t *testing.T) {
 	})
 
 	t.Run("WithLocationPriorities", func(t *testing.T) {
+		t.Parallel()
 		priorities := []string{"url1", "url2"}
 
 		gateway, err := New(sources, WithLocationPriorities(priorities))
@@ -140,6 +151,7 @@ func TestGateway(t *testing.T) {
 	})
 
 	t.Run("WithLogger", func(t *testing.T) {
+		t.Parallel()
 		logger := &DefaultLogger{}
 
 		go func() { // verify no race condition between Gateway instances (singleton): https://github.com/nautilus/gateway/issues/154
@@ -159,6 +171,7 @@ func TestGateway(t *testing.T) {
 	})
 
 	t.Run("fieldURLs ignore introspection", func(t *testing.T) {
+		t.Parallel()
 		locations := fieldURLs(sources, true)
 
 		for key := range locations {
@@ -174,13 +187,14 @@ func TestGateway(t *testing.T) {
 	})
 
 	t.Run("Response Middleware Error", func(t *testing.T) {
+		t.Parallel()
 		// create a new schema with the sources and some configuration
 		gateway, err := New(sources,
-			WithExecutor(ExecutorFunc(func(ctx *ExecutionContext) (map[string]interface{}, error) {
+			WithExecutor(ExecutorFunc(func(*ExecutionContext) (map[string]interface{}, error) {
 				return map[string]interface{}{"goodbye": "moon"}, nil
 			})),
 			WithMiddlewares(
-				ResponseMiddleware(func(ctx *ExecutionContext, response map[string]interface{}) error {
+				ResponseMiddleware(func(*ExecutionContext, map[string]interface{}) error {
 					return errors.New("this string")
 				}),
 			))
@@ -206,13 +220,14 @@ func TestGateway(t *testing.T) {
 	})
 
 	t.Run("Response Middleware Error Empty Data", func(t *testing.T) {
+		t.Parallel()
 		// create a new schema with the sources and some configuration
 		gateway, err := New(sources,
-			WithExecutor(ExecutorFunc(func(ctx *ExecutionContext) (map[string]interface{}, error) {
+			WithExecutor(ExecutorFunc(func(*ExecutionContext) (map[string]interface{}, error) {
 				return map[string]interface{}{}, errors.New("error string")
 			})),
 			WithMiddlewares(
-				ResponseMiddleware(func(ctx *ExecutionContext, response map[string]interface{}) error {
+				ResponseMiddleware(func(*ExecutionContext, map[string]interface{}) error {
 					return errors.New("this string")
 				}),
 			))
@@ -239,13 +254,14 @@ func TestGateway(t *testing.T) {
 	})
 
 	t.Run("Response Middleware Success", func(t *testing.T) {
+		t.Parallel()
 		// create a new schema with the sources and some configuration
 		gateway, err := New(sources,
-			WithExecutor(ExecutorFunc(func(ctx *ExecutionContext) (map[string]interface{}, error) {
+			WithExecutor(ExecutorFunc(func(*ExecutionContext) (map[string]interface{}, error) {
 				return map[string]interface{}{"goodbye": "moon"}, nil
 			})),
 			WithMiddlewares(
-				ResponseMiddleware(func(ctx *ExecutionContext, response map[string]interface{}) error {
+				ResponseMiddleware(func(_ *ExecutionContext, response map[string]interface{}) error {
 					// clear the previous value
 					for k := range response {
 						delete(response, k)
@@ -275,7 +291,6 @@ func TestGateway(t *testing.T) {
 
 		// build a query plan that the executor will follow
 		response, err := gateway.Execute(reqCtx, plan)
-
 		if err != nil {
 			t.Errorf("Encountered error executing plan: %s", err.Error())
 			return
@@ -285,6 +300,7 @@ func TestGateway(t *testing.T) {
 	})
 
 	t.Run("filter out automatically inserted ids", func(t *testing.T) {
+		t.Parallel()
 		// the query we're going to fire. Query.allUsers comes from service one. User.lastName
 		// from service two.
 		query := `
@@ -319,10 +335,9 @@ func TestGateway(t *testing.T) {
 					RootStep: &QueryPlanStep{
 						Then: []*QueryPlanStep{
 							{
-
 								// this is equivalent to
 								// query { allUsers }
-								ParentType:     "Query",
+								ParentType:     typeNameQuery,
 								InsertionPoint: []string{},
 								SelectionSet: ast.SelectionSet{
 									&ast.Field{
@@ -341,7 +356,7 @@ func TestGateway(t *testing.T) {
 									},
 								},
 								// return a known value we can test against
-								Queryer: &graphql.MockSuccessQueryer{map[string]interface{}{
+								Queryer: &graphql.MockSuccessQueryer{Value: map[string]interface{}{
 									"allUsers": []interface{}{
 										map[string]interface{}{
 											"id": "1",
@@ -361,7 +376,7 @@ func TestGateway(t *testing.T) {
 												},
 											},
 										},
-										Queryer: &graphql.MockSuccessQueryer{map[string]interface{}{
+										Queryer: &graphql.MockSuccessQueryer{Value: map[string]interface{}{
 											"node": map[string]interface{}{
 												"lastName": "Hello",
 											},
@@ -406,6 +421,7 @@ func TestGateway(t *testing.T) {
 	})
 
 	t.Run("Introspection field on services", func(t *testing.T) {
+		t.Parallel()
 		// compute the location of each field
 		locations := fieldURLs(sources, false)
 
@@ -416,6 +432,7 @@ func TestGateway(t *testing.T) {
 	})
 
 	t.Run("Gateway fields", func(t *testing.T) {
+		t.Parallel()
 		// define a gateway field
 		viewerField := &QueryField{
 			Name: "viewer",
@@ -426,13 +443,14 @@ func TestGateway(t *testing.T) {
 					Type: ast.NamedType("ID", &ast.Position{}),
 				},
 			},
-			Resolver: func(ctx context.Context, args map[string]interface{}) (string, error) {
+			Resolver: func(_ context.Context, args map[string]interface{}) (string, error) {
 				return args["id"].(string), nil
 			},
 		}
 
 		// create a gateway with the viewer field
 		gateway, err := New(sources, WithQueryFields(viewerField))
+		assert.NoError(t, err)
 
 		// execute the query
 		query := `
@@ -464,7 +482,7 @@ func TestGateway(t *testing.T) {
 			QueryDocument: &ast.QueryDocument{
 				Operations: ast.OperationList{
 					{
-						Operation: "Query",
+						Operation: typeNameQuery,
 						SelectionSet: ast.SelectionSet{
 							&ast.Field{
 								Alias: "viewer",
@@ -491,11 +509,14 @@ func TestGateway(t *testing.T) {
 		}
 
 		// make sure the result of the queryer matches exepctations
-		assert.Equal(t, map[string]interface{}{"viewer": map[string]interface{}{"id": "1"}}, res)
+		resJSON, err := json.Marshal(res)
+		require.NoError(t, err)
+		assert.JSONEq(t, `{"viewer":{"id":"1"}}`, string(resJSON))
 	})
 }
 
 func TestGatewayExecuteRespectsOperationName(t *testing.T) {
+	t.Parallel()
 	// define a schema source
 	schema, _ := graphql.LoadSchema(`
 		type Query {
@@ -538,10 +559,9 @@ func TestGatewayExecuteRespectsOperationName(t *testing.T) {
 				RootStep: &QueryPlanStep{
 					Then: []*QueryPlanStep{
 						{
-
 							// this is equivalent to
 							// query { allUsers }
-							ParentType:     "Query",
+							ParentType:     typeNameQuery,
 							InsertionPoint: []string{},
 							SelectionSet: ast.SelectionSet{
 								&ast.Field{
@@ -552,7 +572,7 @@ func TestGatewayExecuteRespectsOperationName(t *testing.T) {
 								},
 							},
 							// return a known value we can test against
-							Queryer: &graphql.MockSuccessQueryer{map[string]interface{}{
+							Queryer: &graphql.MockSuccessQueryer{Value: map[string]interface{}{
 								"foo": "foo",
 							}},
 						},
@@ -578,10 +598,9 @@ func TestGatewayExecuteRespectsOperationName(t *testing.T) {
 				RootStep: &QueryPlanStep{
 					Then: []*QueryPlanStep{
 						{
-
 							// this is equivalent to
 							// query { allUsers }
-							ParentType:     "Query",
+							ParentType:     typeNameQuery,
 							InsertionPoint: []string{},
 							SelectionSet: ast.SelectionSet{
 								&ast.Field{
@@ -592,7 +611,7 @@ func TestGatewayExecuteRespectsOperationName(t *testing.T) {
 								},
 							},
 							// return a known value we can test against
-							Queryer: &graphql.MockSuccessQueryer{map[string]interface{}{
+							Queryer: &graphql.MockSuccessQueryer{Value: map[string]interface{}{
 								"bar": "bar",
 							}},
 						},
@@ -630,6 +649,7 @@ func TestGatewayExecuteRespectsOperationName(t *testing.T) {
 }
 
 func TestFieldURLs_concat(t *testing.T) {
+	t.Parallel()
 	// create a field url map
 	first := FieldURLMap{}
 	first.RegisterURL("Parent", "field1", "url1")
@@ -666,4 +686,501 @@ func TestFieldURLs_concat(t *testing.T) {
 		return
 	}
 	assert.Equal(t, []string{"url2"}, urlLocations3)
+}
+
+// Verifies fix for https://github.com/nautilus/gateway/issues/199
+func TestIncludeIfVariable(t *testing.T) {
+	t.Parallel()
+	schema, err := graphql.LoadSchema(`
+type Query {
+	hello: String
+	user: User
+}
+
+type User {
+	firstName: String
+}
+`)
+	require.NoError(t, err)
+	queryerFactory := QueryerFactory(func(*PlanningContext, string) graphql.Queryer {
+		return graphql.QueryerFunc(func(input *graphql.QueryInput) (interface{}, error) {
+			query := gqlparser.MustLoadQuery(schema, input.Query)
+			var operation ast.OperationDefinition
+			if assert.Len(t, query.Operations, 1) {
+				operation = *query.Operations[0]
+			}
+			assert.Len(t, operation.VariableDefinitions, 1)
+			assert.NotNil(t, operation.VariableDefinitions.ForName("returnUser"))
+			assert.Equal(t, map[string]interface{}{
+				"returnUser": true,
+			}, input.Variables)
+			return map[string]interface{}{
+				"hello": "world",
+				"user": map[string]interface{}{
+					"firstName": "foo",
+				},
+			}, nil
+		})
+	})
+	gateway, err := New([]*graphql.RemoteSchema{
+		{Schema: schema, URL: "url1"},
+	}, WithQueryerFactory(&queryerFactory))
+	require.NoError(t, err)
+
+	req := httptest.NewRequestWithContext(t.Context(), http.MethodPost, "/", strings.NewReader(fmt.Sprintf(`
+		{
+			"query": %q,
+			"variables": {
+				"returnUser": true
+			}
+		}
+	`, `
+		query($returnUser: Boolean!) {
+			hello
+			user @include(if: $returnUser) {
+				firstName
+			}
+		}
+	`)))
+	resp := httptest.NewRecorder()
+	gateway.GraphQLHandler(resp, req)
+	assert.Equal(t, http.StatusOK, resp.Code)
+	assert.JSONEq(t, `
+		{
+			"data": {
+				"hello": "world",
+				"user": {
+					"firstName": "foo"
+				}
+			}
+		}
+	`, resp.Body.String())
+}
+
+// TestDataAndErrorsBothReturnFromOneServicePartialSuccess verifies fix for https://github.com/nautilus/gateway/issues/212
+func TestDataAndErrorsBothReturnFromOneServicePartialSuccess(t *testing.T) {
+	t.Parallel()
+	schema, err := graphql.LoadSchema(`
+type Query {
+	foo: String
+	bar: String
+}
+`)
+	require.NoError(t, err)
+	queryerFactory := QueryerFactory(func(*PlanningContext, string) graphql.Queryer {
+		return graphql.QueryerFunc(func(*graphql.QueryInput) (interface{}, error) {
+			return map[string]interface{}{
+					"foo": "foo",
+					"bar": nil,
+				}, graphql.ErrorList{
+					&graphql.Error{
+						Message: "bar is broken",
+						Path:    []interface{}{"bar"},
+					},
+				}
+		})
+	})
+	gateway, err := New([]*graphql.RemoteSchema{
+		{Schema: schema, URL: "boo"},
+	}, WithQueryerFactory(&queryerFactory))
+	require.NoError(t, err)
+
+	req := httptest.NewRequestWithContext(t.Context(), http.MethodPost, "/", strings.NewReader(`{"query": "query { foo bar }"}`))
+	resp := httptest.NewRecorder()
+	gateway.GraphQLHandler(resp, req)
+	assert.Equal(t, http.StatusOK, resp.Code)
+	assert.JSONEq(t, `
+		{
+			"data": {
+				"foo": "foo",
+				"bar": null
+			},
+			"errors": [
+				{
+					"message": "bar is broken",
+					"path": ["bar"],
+					"extensions": null
+				}
+			]
+		}
+	`, resp.Body.String())
+}
+
+// TestGatewayRunsResponseMiddlewaresOnError verifies part of fix for https://github.com/nautilus/gateway/issues/212
+// The issue included the 'id' field not getting scrubbed when an error was returned, and scrubbing is a builtin response middleware.
+func TestGatewayRunsResponseMiddlewaresOnError(t *testing.T) {
+	t.Parallel()
+	schema, err := graphql.LoadSchema(`
+type Query {
+	foo: String
+}
+`)
+	require.NoError(t, err)
+	queryerFactory := QueryerFactory(func(*PlanningContext, string) graphql.Queryer {
+		return graphql.QueryerFunc(func(*graphql.QueryInput) (interface{}, error) {
+			return map[string]interface{}{
+					"foo": nil,
+				}, graphql.ErrorList{
+					&graphql.Error{
+						Message: "foo is broken",
+						Path:    []interface{}{"foo"},
+					},
+				}
+		})
+	})
+	executedResponseMiddleware := false
+	gateway, err := New([]*graphql.RemoteSchema{
+		{Schema: schema, URL: "boo"},
+	}, WithQueryerFactory(&queryerFactory), WithMiddlewares(ResponseMiddleware(func(*ExecutionContext, map[string]interface{}) error {
+		executedResponseMiddleware = true
+		return nil
+	})))
+	require.NoError(t, err)
+
+	req := httptest.NewRequestWithContext(t.Context(), http.MethodPost, "/", strings.NewReader(`{"query": "query { foo }"}`))
+	resp := httptest.NewRecorder()
+	gateway.GraphQLHandler(resp, req)
+	assert.Equal(t, http.StatusOK, resp.Code)
+	assert.JSONEq(t, `
+		{
+			"data": {
+				"foo": null
+			},
+			"errors": [
+				{
+					"message": "foo is broken",
+					"path": ["foo"],
+					"extensions": null
+				}
+			]
+		}
+	`, resp.Body.String())
+	assert.True(t, executedResponseMiddleware, "All response middleware should run, even on responses with errors")
+}
+
+// TestPartialSuccessAlsoResolvesValidNodeIDs verifies fix for https://github.com/nautilus/gateway/issues/214
+func TestPartialSuccessAlsoResolvesValidNodeIDs(t *testing.T) {
+	t.Parallel()
+	schemaFoo, err := graphql.LoadSchema(`
+type Query {
+	foo: Foo
+}
+
+type Foo {
+	bar: Bar
+	boo: String
+}
+
+interface Node {
+	id: ID!
+}
+
+type Bar implements Node {
+	id: ID!
+}
+`)
+	require.NoError(t, err)
+	schemaBar, err := graphql.LoadSchema(`
+type Query {
+	node(id: ID!): Node
+}
+
+interface Node {
+	id: ID!
+}
+
+type Bar implements Node {
+	id: ID!
+	baz: String
+}
+`)
+	require.NoError(t, err)
+	const query = `
+		query {
+			foo {
+				bar {
+					baz
+				}
+			}
+		}
+	`
+	queryerFactory := QueryerFactory(func(*PlanningContext, string) graphql.Queryer {
+		return graphql.QueryerFunc(func(input *graphql.QueryInput) (interface{}, error) {
+			t.Log("Received request:", input.Query)
+			if strings.Contains(input.Query, "node(") {
+				return map[string]interface{}{
+					"node": map[string]interface{}{
+						"baz": "biff",
+					},
+				}, nil
+			}
+			return map[string]interface{}{
+					"foo": map[string]interface{}{
+						"bar": map[string]interface{}{
+							"id": "bar-id",
+						},
+						"boo": nil,
+					},
+				}, graphql.ErrorList{
+					&graphql.Error{
+						Message: "boo is broken",
+						Path:    []interface{}{"foo", "boo"},
+					},
+				}
+		})
+	})
+	gateway, err := New([]*graphql.RemoteSchema{
+		{Schema: schemaFoo, URL: "foo"},
+		{Schema: schemaBar, URL: "bar"},
+	}, WithQueryerFactory(&queryerFactory))
+	require.NoError(t, err)
+
+	req := httptest.NewRequestWithContext(t.Context(), http.MethodPost, "/", strings.NewReader(fmt.Sprintf(`{"query": %q}`, query)))
+	resp := httptest.NewRecorder()
+	gateway.GraphQLHandler(resp, req)
+	assert.Equal(t, http.StatusOK, resp.Code)
+	assert.JSONEq(t, `
+		{
+			"data": {
+				"foo": {
+					"bar": {
+						"baz": "biff"
+					},
+					"boo": null
+				}
+			},
+			"errors": [
+				{
+					"message": "boo is broken",
+					"path": ["foo", "boo"],
+					"extensions": null
+				}
+			]
+		}
+	`, resp.Body.String())
+}
+
+func TestNodeIsNull(t *testing.T) {
+	t.Parallel()
+	schemaFoo, err := graphql.LoadSchema(`
+type Query {
+	node(id: ID!): Node
+}
+
+interface Node {
+	id: ID!
+}
+
+type Foo implements Node {
+	id: ID!
+}
+`)
+	require.NoError(t, err)
+	schemaBar, err := graphql.LoadSchema(`
+type Query {
+	node(id: ID!): Node
+}
+
+interface Node {
+	id: ID!
+}
+
+type Foo implements Node {
+	id: ID!
+	bar: String
+}
+`)
+	require.NoError(t, err)
+	const (
+		query = `
+			query($id: ID!) {
+				node(id: $id) {
+					... on Foo {
+						id
+						bar
+					}
+				}
+			}
+		`
+		fooURL = "foo"
+		barURL = "bar"
+	)
+	makeQueryerFactory := func(t *testing.T, barResponse any, barErr error) *QueryerFactory {
+		queryerFactory := QueryerFactory(func(_ *PlanningContext, url string) graphql.Queryer {
+			return graphql.QueryerFunc(func(input *graphql.QueryInput) (any, error) {
+				t.Log("Received request for", url, "service:", input.Query)
+				switch url {
+				case fooURL:
+					assert.Equal(t, strings.TrimSpace(`
+query ($id: ID!) {
+	node(id: $id) {
+		... on Node {
+			... on Foo {
+				id
+			}
+		}
+	}
+}
+`), strings.TrimSpace(input.Query), fooURL)
+					return map[string]any{"node": nil}, nil
+				case barURL:
+					assert.Equal(t, strings.TrimSpace(`
+query ($id: ID!) {
+	node(id: $id) {
+		... on Node {
+			... on Foo {
+				bar
+			}
+		}
+	}
+}
+`), strings.TrimSpace(input.Query), barURL)
+					return barResponse, barErr
+				default:
+					return nil, &graphql.Error{Message: "must not be reached"}
+				}
+			})
+		})
+		return &queryerFactory
+	}
+
+	reqBody := fmt.Sprintf(`{"query": %q, "variables": {"id":"foo"}}`, query)
+
+	t.Run("not found", func(t *testing.T) {
+		t.Parallel()
+		barResponse := map[string]any{"node": nil}
+		gateway, err := New([]*graphql.RemoteSchema{
+			{Schema: schemaFoo, URL: fooURL},
+			{Schema: schemaBar, URL: barURL},
+		}, WithQueryerFactory(makeQueryerFactory(t, barResponse, nil)))
+		require.NoError(t, err)
+		req := httptest.NewRequestWithContext(t.Context(), http.MethodPost, "/", strings.NewReader(reqBody))
+		resp := httptest.NewRecorder()
+		gateway.GraphQLHandler(resp, req)
+		assert.Equal(t, http.StatusOK, resp.Code)
+		assert.JSONEq(t, `{
+			"data": {
+				"node": null
+			}
+		}`, resp.Body.String())
+	})
+
+	t.Run("found", func(t *testing.T) {
+		t.Parallel()
+		barResponse := map[string]any{"node": map[string]any{"bar": "bar"}} // found
+		gateway, err := New([]*graphql.RemoteSchema{
+			{Schema: schemaFoo, URL: fooURL},
+			{Schema: schemaBar, URL: barURL},
+		}, WithQueryerFactory(makeQueryerFactory(t, barResponse, nil)))
+		require.NoError(t, err)
+		req := httptest.NewRequestWithContext(t.Context(), http.MethodPost, "/", strings.NewReader(reqBody))
+		resp := httptest.NewRecorder()
+		gateway.GraphQLHandler(resp, req)
+		assert.Equal(t, http.StatusOK, resp.Code)
+		assert.JSONEq(t, `{
+			"data": {
+				"node": {
+					"bar": "bar"
+				}
+			}
+		}`, resp.Body.String())
+	})
+
+	t.Run("error", func(t *testing.T) {
+		t.Parallel()
+		gateway, err := New([]*graphql.RemoteSchema{
+			{Schema: schemaFoo, URL: fooURL},
+			{Schema: schemaBar, URL: barURL},
+		}, WithQueryerFactory(makeQueryerFactory(t, nil, graphql.ErrorList{
+			&graphql.Error{Message: "some error"},
+		})))
+		require.NoError(t, err)
+		req := httptest.NewRequestWithContext(t.Context(), http.MethodPost, "/", strings.NewReader(reqBody))
+		resp := httptest.NewRecorder()
+		gateway.GraphQLHandler(resp, req)
+		assert.Equal(t, http.StatusOK, resp.Code)
+		assert.JSONEq(t, `{
+			"data": {
+				"node": null
+			},
+			"errors": [
+				{
+					"message": "some error",
+					"extensions": null
+				}
+			]
+		}`, resp.Body.String())
+	})
+}
+
+func TestSingleObjectOnlyRequestingNonIDFieldScrubsIDs(t *testing.T) {
+	t.Parallel()
+	const (
+		schemaStr = `
+			type Query {
+				node(id: ID!): Node
+			}
+
+			interface Node {
+				id: ID!
+			}
+
+			type User implements Node {
+				id: ID!
+				firstName: String!
+				lastName: String!
+			}
+		`
+	)
+	schema, err := graphql.LoadSchema(schemaStr)
+	require.NoError(t, err)
+	source := &graphql.RemoteSchema{Schema: schema, URL: "url1"}
+	queryerFactory := QueryerFactory(func(*PlanningContext, string) graphql.Queryer {
+		return graphql.QueryerFunc(func(input *graphql.QueryInput) (any, error) {
+			assert.Equal(t, map[string]any{
+				"id": "foo",
+			}, input.Variables)
+			return map[string]any{
+				"node": map[string]any{
+					"lastName": "bar",
+				},
+			}, nil
+		})
+	})
+
+	gateway, err := New([]*graphql.RemoteSchema{source}, WithQueryerFactory(&queryerFactory))
+	require.NoError(t, err)
+
+	req := httptest.NewRequestWithContext(t.Context(), http.MethodPost, "/", strings.NewReader(fmt.Sprintf(`
+		{
+			"query": %q,
+			"variables": {
+				"id": "foo"
+			}
+		}
+	`, `
+		query($id: ID!) {
+			node(id: $id) {
+				... on User {
+					lastName
+				}
+			}
+		}
+	`)))
+	resp := httptest.NewRecorder()
+	gateway.GraphQLHandler(resp, req)
+	t.Log("Response:", resp.Body.String())
+	require.Equal(t, http.StatusOK, resp.Code)
+
+	var response map[string]any
+	require.NoError(t, json.NewDecoder(resp.Body).Decode(&response))
+
+	// make sure we didn't get any ids
+	assert.Equal(t, map[string]any{
+		"data": map[string]any{
+			"node": map[string]any{
+				"lastName": "bar",
+			},
+		},
+	}, response, "Response must not contain ID fields and not fail while scrubbing them.")
 }

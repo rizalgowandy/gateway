@@ -4,9 +4,12 @@ import (
 	"context"
 
 	"github.com/99designs/gqlgen/graphql/introspection"
-	"github.com/mitchellh/mapstructure"
+	"github.com/go-viper/mapstructure/v2"
+	"github.com/vektah/gqlparser/v2"
 	"github.com/vektah/gqlparser/v2/ast"
+	"github.com/vektah/gqlparser/v2/gqlerror"
 
+	"github.com/nautilus/gateway/internal/execresult"
 	"github.com/nautilus/graphql"
 )
 
@@ -14,13 +17,31 @@ import (
 // that points to the gateway's internal schema.
 const internalSchemaLocation = "🎉"
 
+// Introspection schema field names
+const (
+	introspectArgs              = "args"
+	introspectDeprecationReason = "deprecationReason"
+	introspectDescription       = "description"
+	introspectEnumValues        = "enumValues"
+	introspectFields            = "fields"
+	introspectInputFields       = "inputFields"
+	introspectInterfaces        = "interfaces"
+	introspectIsDeprecated      = "isDeprecated"
+	introspectKind              = "kind"
+	introspectName              = "name"
+	introspectOfType            = "ofType"
+	introspectPossibleTypes     = "possibleTypes"
+	introspectType              = "type"
+)
+
 // QueryField is a hook to add gateway-level fields to a gateway. Limited to only being able to resolve
 // an id of an already existing type in order to keep business logic out of the gateway.
 type QueryField struct {
-	Name      string
-	Type      *ast.Type
-	Arguments ast.ArgumentDefinitionList
-	Resolver  func(context.Context, map[string]interface{}) (string, error)
+	Name             string
+	Type             *ast.Type
+	Arguments        ast.ArgumentDefinitionList
+	Resolver         func(context.Context, map[string]interface{}) (string, error)
+	NotAuthoritative bool // Set to true to indicate the resolved Node is not authoritative, and therefore should be resolved to null when no other resolvers return a value.
 }
 
 // Query takes a query definition and writes the result to the receiver
@@ -30,6 +51,18 @@ func (g *Gateway) Query(ctx context.Context, input *graphql.QueryInput, receiver
 
 	// wrap the schema in something capable of introspection
 	introspectionSchema := introspection.WrapSchema(g.schema)
+
+	if input.QueryDocument == nil && input.Query != "" {
+		internalSchema, err := g.internalSchema()
+		if err != nil {
+			return err
+		}
+		var loadErr gqlerror.List
+		input.QueryDocument, loadErr = gqlparser.LoadQuery(internalSchema, input.Query)
+		if len(loadErr) > 0 {
+			return loadErr
+		}
+	}
 
 	// for local stuff we don't care about fragment directives
 	querySelection, err := graphql.ApplyFragments(input.QueryDocument.Operations[0].SelectionSet, input.QueryDocument.Fragments)
@@ -49,7 +82,8 @@ func (g *Gateway) Query(ctx context.Context, input *graphql.QueryInput, receiver
 			var introspectedType *introspection.Type
 			for _, schemaType := range introspectionSchema.Types() {
 				if *schemaType.Name() == name {
-					introspectedType = &schemaType
+					schemaTypeCopy := schemaType // copy loop var
+					introspectedType = &schemaTypeCopy
 					break
 				}
 			}
@@ -83,11 +117,20 @@ func (g *Gateway) Query(ctx context.Context, input *graphql.QueryInput, receiver
 					// find the id of the entity
 					id, err := qField.Resolver(ctx, args)
 					if err != nil {
-						return err
+						return &graphql.Error{
+							Message: err.Error(),
+							Path:    []interface{}{field.Alias},
+						}
 					}
 
 					// assign the id to the response
-					result[field.Alias] = map[string]interface{}{"id": id}
+					node := execresult.NewObjectFromMap(map[string]any{
+						"id": id,
+					})
+					if qField.NotAuthoritative {
+						node.SetWeak()
+					}
+					result[field.Alias] = node
 				}
 			}
 		}
@@ -148,23 +191,23 @@ func (g *Gateway) introspectType(schemaType *introspection.Type, selectionSet as
 		}
 
 		switch field.Name {
-		case "kind":
+		case introspectKind:
 			result[field.Alias] = schemaType.Kind()
-		case "name":
+		case introspectName:
 			result[field.Alias] = schemaType.Name()
-		case "description":
+		case introspectDescription:
 			result[field.Alias] = schemaType.Description()
-		case "fields":
+		case introspectFields:
 			result[field.Alias] = g.introspectFieldSlice(schemaType.Fields(includeDeprecated), field.SelectionSet)
-		case "interfaces":
+		case introspectInterfaces:
 			result[field.Alias] = g.introspectTypeSlice(schemaType.Interfaces(), field.SelectionSet)
-		case "possibleTypes":
+		case introspectPossibleTypes:
 			result[field.Alias] = g.introspectTypeSlice(schemaType.PossibleTypes(), field.SelectionSet)
-		case "enumValues":
+		case introspectEnumValues:
 			result[field.Alias] = g.introspectEnumValueSlice(schemaType.EnumValues(includeDeprecated), field.SelectionSet)
-		case "inputFields":
+		case introspectInputFields:
 			result[field.Alias] = g.introspectInputValueSlice(schemaType.InputFields(), field.SelectionSet)
-		case "ofType":
+		case introspectOfType:
 			result[field.Alias] = g.introspectType(schemaType.OfType(), field.SelectionSet)
 		}
 	}
@@ -177,17 +220,17 @@ func (g *Gateway) introspectField(fieldDef introspection.Field, selectionSet ast
 
 	for _, field := range graphql.SelectedFields(selectionSet) {
 		switch field.Name {
-		case "name":
+		case introspectName:
 			result[field.Alias] = fieldDef.Name
-		case "description":
-			result[field.Alias] = fieldDef.Description
-		case "args":
+		case introspectDescription:
+			result[field.Alias] = fieldDef.Description()
+		case introspectArgs:
 			result[field.Alias] = g.introspectInputValueSlice(fieldDef.Args, field.SelectionSet)
-		case "type":
+		case introspectType:
 			result[field.Alias] = g.introspectType(fieldDef.Type, field.SelectionSet)
-		case "isDeprecated":
+		case introspectIsDeprecated:
 			result[field.Alias] = fieldDef.IsDeprecated()
-		case "deprecationReason":
+		case introspectDeprecationReason:
 			result[field.Alias] = fieldDef.DeprecationReason()
 		}
 	}
@@ -200,13 +243,13 @@ func (g *Gateway) introspectEnumValue(definition *introspection.EnumValue, selec
 
 	for _, field := range graphql.SelectedFields(selectionSet) {
 		switch field.Name {
-		case "name":
+		case introspectName:
 			result[field.Alias] = definition.Name
-		case "description":
-			result[field.Alias] = definition.Description
-		case "isDeprecated":
+		case introspectDescription:
+			result[field.Alias] = definition.Description()
+		case introspectIsDeprecated:
 			result[field.Alias] = definition.IsDeprecated()
-		case "deprecationReason":
+		case introspectDeprecationReason:
 			result[field.Alias] = definition.DeprecationReason()
 		}
 	}
@@ -220,11 +263,11 @@ func (g *Gateway) introspectDirective(directive introspection.Directive, selecti
 
 	for _, field := range graphql.SelectedFields(selectionSet) {
 		switch field.Name {
-		case "name":
+		case introspectName:
 			result[field.Alias] = directive.Name
-		case "description":
-			result[field.Alias] = directive.Description
-		case "args":
+		case introspectDescription:
+			result[field.Alias] = directive.Description()
+		case introspectArgs:
 			result[field.Alias] = g.introspectInputValueSlice(directive.Args, field.SelectionSet)
 		case "locations":
 			result[field.Alias] = directive.Locations
@@ -239,12 +282,14 @@ func (g *Gateway) introspectInputValue(iv *introspection.InputValue, selectionSe
 
 	for _, field := range graphql.SelectedFields(selectionSet) {
 		switch field.Name {
-		case "name":
+		case introspectName:
 			result[field.Alias] = iv.Name
-		case "description":
-			result[field.Alias] = iv.Description
+		case introspectDescription:
+			result[field.Alias] = iv.Description()
 		case "type":
 			result[field.Alias] = g.introspectType(iv.Type, field.SelectionSet)
+		case "defaultValue":
+			result[field.Alias] = iv.DefaultValue
 		}
 	}
 

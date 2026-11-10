@@ -1,36 +1,66 @@
 name: CI Checks
 
 # run this workflow on commits and pull requests
-on: [push, pull_request]
+on:
+  push:
+    branches: [ master ]
+  pull_request:
 
 jobs:
-  tests:
-    name: Run Tests
+  lint:
+    name: Lint
     runs-on: ubuntu-latest
-
     steps:
-      - name: Use Go 1.13
-        uses: actions/setup-go@v1
+      - uses: actions/setup-go@v3
         with:
-          go-version: 1.13
+          go-version: 1.26.x  # Avoid latest here (i.e. '^1.2'). New Go minor versions can break linters.
+      - uses: actions/checkout@v3
+      - name: golangci-lint
+        uses: golangci/golangci-lint-action@v8
+        with:
+          version: v2.11
+
+  build:
+    name: Build release binaries
+    runs-on: ubuntu-latest
+    steps:
+      - name: Use latest Go version
+        uses: actions/setup-go@v3
+        with:
+          go-version: ^1.26
 
       - name: Checkout source
         uses: actions/checkout@master
         with:
           ref: ${{ github.ref }}
 
-      - name: Install runner and dependencies
-        run: |
-          go get github.com/alecaivazis/run
-          export PATH=${PATH}:`go env GOPATH`/bin
-          run install:ci
+      - name: Build
+        run: make -j8 build  # '-j N' runs each build task in parallel.
+
+  tests:
+    name: Test with Go ${{ matrix.go }}
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        go:
+          - 1.25.x
+          - ^1.26  # Latest version of Go
+    steps:
+      - name: Use Go ${{ matrix.go }}
+        uses: actions/setup-go@v3
+        with:
+          go-version: ${{ matrix.go }}
+
+      - name: Checkout source
+        uses: actions/checkout@master
+        with:
+          ref: ${{ github.ref }}
 
       - name: Run tests
-        run: |
-          export PATH=${PATH}:`go env GOPATH`/bin
-          run tests:coverage
+        run: make test
 
       - name: Report to Coveralls
+        if: matrix.go == '^1.26'
         uses: shogo82148/actions-goveralls@v1
         with:
-          path-to-profile: coverage.out
+          path-to-profile: cover.out

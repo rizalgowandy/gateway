@@ -1,15 +1,21 @@
 package gateway
 
 import (
-	"errors"
+	"bytes"
+	"iter"
+	"slices"
+	"strings"
 	"testing"
 
 	"github.com/nautilus/graphql"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 	"github.com/vektah/gqlparser/v2/ast"
+	"github.com/vektah/gqlparser/v2/formatter"
 )
 
 func TestMergeSchema_assignQueryType(t *testing.T) {
+	t.Parallel()
 	// create the first schema
 	schema1, err := graphql.LoadSchema(`
 			type Query {
@@ -45,6 +51,7 @@ func TestMergeSchema_assignQueryType(t *testing.T) {
 }
 
 func TestMergeSchema_assignMutationType(t *testing.T) {
+	t.Parallel()
 	// create the first schema
 	schema1, err := graphql.LoadSchema(`
 			type Mutation {
@@ -79,17 +86,17 @@ func TestMergeSchema_assignMutationType(t *testing.T) {
 	}
 }
 
-func TestMergeSchema_inputTypes(t *testing.T) {
-	// create the first schema
-	originalSchema, err := graphql.LoadSchema(`
-		input Foo {
-			firstName: String!
-		}
-	`)
-	assert.Nil(t, err)
-
-	t.Run("Matching", func(t *testing.T) {
+func TestMergeSchema_inputObjects(t *testing.T) {
+	t.Parallel()
+	t.Run("Matching fields", func(t *testing.T) {
+		t.Parallel()
 		// merge the schema with one that should work
+		originalSchema, err := graphql.LoadSchema(`
+			input Foo {
+				firstName: String!
+			}
+		`)
+		assert.Nil(t, err)
 		schema, err := testMergeSchemas(t, originalSchema, `
 			input Foo {
 				firstName: String!
@@ -110,6 +117,31 @@ func TestMergeSchema_inputTypes(t *testing.T) {
 			t.Errorf("Encountered incorrect number of fields. Expected 1 found %v", len(inputType.Fields))
 			return
 		}
+	})
+
+	t.Run("Mismatched directive lists", func(t *testing.T) {
+		t.Parallel()
+		originalSchema, err := graphql.LoadSchema(`
+			input Foo {
+				firstName: String!
+			}
+		`)
+		require.NoError(t, err)
+		schema, err := testMergeSchemas(t, originalSchema, `
+			directive @bar on INPUT_OBJECT
+			input Foo @bar {
+				firstName: String!
+			}
+		`)
+		require.NoError(t, err)
+		var schemaBuffer bytes.Buffer
+		formatter.NewFormatter(&schemaBuffer).FormatSchema(schema)
+		assert.Contains(t, schemaBuffer.String(), strings.TrimSpace(`
+directive @bar on INPUT_OBJECT
+input Foo @bar {
+	firstName: String!
+}
+		`))
 	})
 
 	// the table we are testing
@@ -144,14 +176,16 @@ func TestMergeSchema_inputTypes(t *testing.T) {
 		{
 			"Conflicting directives",
 			`
-				input Foo {
+				directive @foo on INPUT_OBJECT
+
+				input Foo @foo {
 					lastName: String!
 				}
 			`,
 			`
-				directive @foo on INPUT_OBJECT
+				directive @bar on INPUT_OBJECT
 
-				input Foo @foo {
+				input Foo @bar {
 					lastName: String!
 				}
 			`,
@@ -159,31 +193,33 @@ func TestMergeSchema_inputTypes(t *testing.T) {
 		{
 			"Conflicting field directives",
 			`
+				directive @foo on INPUT_FIELD_DEFINITION
+
 				input Foo {
-					lastName: String!
+					lastName: String! @foo
 				}
 			`,
 			`
-				directive @foo on FIELD_DEFINITION
+				directive @bar on INPUT_FIELD_DEFINITION
 
 				input Foo  {
-					lastName: String! @foo
+					lastName: String! @bar
 				}
 			`,
 		},
 		{
 			"Conflicting total field directives",
 			`
-				directive @foo on FIELD_DEFINITION
+				directive @foo on INPUT_FIELD_DEFINITION
 
-				directive @bar on FIELD_DEFINITION
+				directive @bar on INPUT_FIELD_DEFINITION
 
 				input Foo {
 					lastName: String! @foo @bar
 				}
 			`,
 			`
-				directive @foo on FIELD_DEFINITION
+				directive @foo on INPUT_FIELD_DEFINITION
 
 				input Foo  {
 					lastName: String! @foo
@@ -194,7 +230,9 @@ func TestMergeSchema_inputTypes(t *testing.T) {
 }
 
 func TestMergeSchema_objectTypes(t *testing.T) {
+	t.Parallel()
 	t.Run("Merge fields", func(t *testing.T) {
+		t.Parallel()
 		// create the first schema
 		originalSchema, err := graphql.LoadSchema(`
 			type User {
@@ -227,9 +265,10 @@ func TestMergeSchema_objectTypes(t *testing.T) {
 
 		// look for the definitions
 		for _, field := range definition.Fields {
-			if field.Name == "firstName" {
+			switch field.Name {
+			case "firstName":
 				firstNameDefinition = field
-			} else if field.Name == "lastName" {
+			case "lastName":
 				lastNameDefinition = field
 			}
 		}
@@ -247,7 +286,6 @@ func TestMergeSchema_objectTypes(t *testing.T) {
 			return
 		}
 		assert.Equal(t, "String!", lastNameDefinition.Type.String())
-
 	})
 
 	// the table we are testing
@@ -268,14 +306,16 @@ func TestMergeSchema_objectTypes(t *testing.T) {
 		{
 			"Conflicting declaration directives",
 			`
-				directive @foo(url: String!) on OBJECT
+				directive @foo on OBJECT
 
 				type User @foo {
 					firstName: String
 				}
 			`,
 			`
-				type User {
+				directive @bar on OBJECT
+
+				type User @bar {
 					firstName: String
 				}
 			`,
@@ -298,46 +338,29 @@ func TestMergeSchema_objectTypes(t *testing.T) {
 			`,
 		},
 		{
-			"Conflicting field descriptions",
-			`
-				type User {
-					"description"
-					firstName: String!
-				}
-			`,
-			`
-				type User {
-					"other-description"
-					firstName: String!
-				}
-			`,
-		},
-		{
 			"Conflicting field argument default value",
 			`
 				type User {
-					"description"
-					firstName: String!
+					firstName(arg: String = "abc"): String!
 				}
 			`,
 			`
 				type User {
-					"other-description"
-					firstName: String!
+					firstName(arg: String = "def"): String!
 				}
 			`,
 		},
 		{
 			"Conflicting number of directive arguments",
 			`
-				directive @foo(url: String!, url2: String!) on FIELD_DEFINITION
+				directive @foo(url: String!, url2: String) on FIELD_DEFINITION
 
 				type User {
 					firstName: String! @foo(url: "3")
 				}
 			`,
 			`
-				directive @foo(url: String!, url2: String!) on FIELD_DEFINITION
+				directive @foo(url: String!, url2: String) on FIELD_DEFINITION
 
 				type User {
 					firstName: String! @foo(url: "3", url2: "3")
@@ -387,7 +410,9 @@ func TestMergeSchema_objectTypes(t *testing.T) {
 }
 
 func TestMergeSchema_enums(t *testing.T) {
+	t.Parallel()
 	t.Run("Matching", func(t *testing.T) {
+		t.Parallel()
 		// the directive that we are always comparing to
 		originalSchema, err := graphql.LoadSchema(`
 			enum Foo {
@@ -428,44 +453,15 @@ func TestMergeSchema_enums(t *testing.T) {
 				}
 			`,
 		},
-		{
-			"Conflicting value descriptions",
-			`
-				enum Foo {
-					"description"
-					Bar
-					Baz
-				}
-			`,
-			`
-				enum Foo {
-					Bar
-				}
-			`,
-		},
-		{
-			"Conflicting descriptions",
-			`
-				"description"
-				enum Foo {
-					Bar
-					Baz
-				}
-			`,
-			`
-				enum Foo {
-					Bar
-				}
-			`,
-		},
 	})
 }
 
-func TestMergeSchema_directives(t *testing.T) {
+func TestMergeSchema_directiveDefinitions(t *testing.T) {
+	t.Parallel()
 	t.Run("Matching", func(t *testing.T) {
+		t.Parallel()
 		// the directive that we are always comparing to
 		originalSchema, err := graphql.LoadSchema(`
-			"description"
 			directive @foo(url: String = "url") on FIELD_DEFINITION
 		`)
 		// make sure nothing went wrong
@@ -475,7 +471,6 @@ func TestMergeSchema_directives(t *testing.T) {
 
 		// merge the schema with one that should work
 		_, err = testMergeSchemas(t, originalSchema, `
-			"description"
 			directive @foo(url: String = "url") on FIELD_DEFINITION
 		`)
 		if err != nil {
@@ -513,23 +508,11 @@ func TestMergeSchema_directives(t *testing.T) {
 			`,
 		},
 		{
-			"Different description",
-			`
-				"other-desription"
-				directive @foo on FIELD_DEFINITION
-			`,
-			`
-				"desription"
-				directive @foo on FIELD_DEFINITION
-			`,
-		},
-		{
 			"Different field types",
 			`
 				directive @foo(foo: String) on FIELD_DEFINITION
 			`,
 			`
-				"desription"
 				directive @foo(foo: [String]) on FIELD_DEFINITION
 			`,
 		},
@@ -540,17 +523,6 @@ func TestMergeSchema_directives(t *testing.T) {
 			`,
 			`
 				directive @foo on FRAGMENT_SPREAD | FIELD_DEFINITION
-			`,
-		},
-		{
-			"Different Description",
-			`
-				"description"
-				directive @foo on FIELD_DEFINITION
-			`,
-			`
-				"other description"
-				directive @foo on FIELD_DEFINITION
 			`,
 		},
 		{
@@ -566,7 +538,9 @@ func TestMergeSchema_directives(t *testing.T) {
 }
 
 func TestMergeSchema_union(t *testing.T) {
+	t.Parallel()
 	t.Run("Matching", func(t *testing.T) {
+		t.Parallel()
 		// the directive that we are always comparing to
 		originalSchema, err := graphql.LoadSchema(`
 			type CatPhoto {
@@ -672,7 +646,9 @@ func TestMergeSchema_union(t *testing.T) {
 }
 
 func TestMergeSchema_unions(t *testing.T) {
+	t.Parallel()
 	t.Run("Matching", func(t *testing.T) {
+		t.Parallel()
 		originalSchema, err := graphql.LoadSchema(`
 			type Foo {
 				name: String!	
@@ -737,7 +713,9 @@ func TestMergeSchema_unions(t *testing.T) {
 }
 
 func TestMergeSchema_interfaces(t *testing.T) {
+	t.Parallel()
 	t.Run("Matching", func(t *testing.T) {
+		t.Parallel()
 		// the directive that we are always comparing to
 		originalSchema, err := graphql.LoadSchema(`
 			interface Foo {
@@ -784,7 +762,52 @@ func TestMergeSchema_interfaces(t *testing.T) {
 		assert.True(t, visited["Foo"], "did not have Foo in possible type")
 		assert.True(t, visited["User"], "did not have User in possible type")
 		assert.True(t, visited["NotUser"], "did not have NotUser in possible type")
+	})
+	t.Run("Implements interface", func(t *testing.T) {
+		t.Parallel()
+		originalSchema, err := graphql.LoadSchema(`
+			interface Node {
+				id: ID!
+			}
+			interface Foo implements Node {
+				id: ID!
+				name: String!
+			}
 
+			type User implements Foo & Node {
+				id: ID!
+				name: String!
+			}
+		`)
+		require.NoError(t, err, "original schema didn't parse")
+
+		schema, err := testMergeSchemas(t, originalSchema, `
+			interface Node {
+				id: ID!
+			}
+
+			interface Foo implements Node {
+				id: ID!
+				name: String!
+			}
+
+			type NotUser implements Foo & Node {
+				id: ID!
+				name: String!
+			}
+		`)
+		require.NoError(t, err)
+
+		possibleTypes := func(typeName string) []string {
+			var types []string
+			for _, def := range schema.GetPossibleTypes(schema.Types[typeName]) {
+				types = append(types, def.Name)
+			}
+			return types
+		}
+
+		assert.ElementsMatch(t, []string{"Foo", "User", "NotUser"}, possibleTypes("Foo"))
+		assert.ElementsMatch(t, []string{"Node", "Foo", "User", "NotUser"}, possibleTypes("Node"))
 	})
 
 	// the table we are testing
@@ -792,15 +815,17 @@ func TestMergeSchema_interfaces(t *testing.T) {
 		{
 			"Different Field Directives",
 			`
-				interface Foo {
-					name: String!
-				}
-			`,
-			`
 				directive @foo on FIELD_DEFINITION
 
 				interface Foo {
 					name: String! @foo
+				}
+			`,
+			`
+				directive @bar on FIELD_DEFINITION
+
+				interface Foo {
+					name: String! @bar
 				}
 			`,
 		},
@@ -818,15 +843,13 @@ func TestMergeSchema_interfaces(t *testing.T) {
 			`,
 		},
 		{
-			"Different Descriptions",
+			"Different interface types",
 			`
-				"description"
 				interface Foo {
 					name: String!
 				}
 			`,
 			`
-				"not-description"
 				interface Foo {
 					name: String
 				}
@@ -869,15 +892,19 @@ type testMergeTableRow struct {
 }
 
 func testMergeRunNegativeTable(t *testing.T, table []testMergeTableRow) {
+	t.Helper()
 	for _, row := range table {
 		t.Run(row.Message, func(t *testing.T) {
-			original, _ := graphql.LoadSchema(row.Schema1)
-			if original == nil {
-				t.Error("could not build schema")
+			t.Helper()
+			t.Parallel()
+			original, err := graphql.LoadSchema(row.Schema1)
+			if err != nil {
+				t.Errorf("Failed to load schema:\n%s", row.Schema1)
+				t.Fatal(err)
 			}
 
 			// we're assuming the test needs to fail
-			_, err := testMergeSchemas(t, original, row.Schema2)
+			_, err = testMergeSchemas(t, original, row.Schema2)
 			if err == nil {
 				t.Error("Did not encounter an error when one was expected")
 			}
@@ -886,11 +913,12 @@ func testMergeRunNegativeTable(t *testing.T, table []testMergeTableRow) {
 }
 
 func testMergeSchemas(t *testing.T, schema1 *ast.Schema, schema2Str string) (*ast.Schema, error) {
+	t.Helper()
 	// create a schema with the provided content
-	schema2, _ := graphql.LoadSchema(schema2Str)
-	if schema2 == nil {
-		t.Error("could not build schema")
-		return nil, errors.New("could not build schema")
+	schema2, err := graphql.LoadSchema(schema2Str)
+	if err != nil {
+		t.Errorf("Failed to load schema:\n%s", schema2Str)
+		t.Fatal(err)
 	}
 
 	// create remote schemas with each
@@ -898,7 +926,6 @@ func testMergeSchemas(t *testing.T, schema1 *ast.Schema, schema2Str string) (*as
 		{Schema: schema1, URL: "url1"},
 		{Schema: schema2, URL: "url2"},
 	})
-
 	if err != nil {
 		return nil, err
 	}
@@ -907,11 +934,11 @@ func testMergeSchemas(t *testing.T, schema1 *ast.Schema, schema2Str string) (*as
 }
 
 func TestMergeSchemaDifferentSetsOfInterfaces(t *testing.T) {
+	t.Parallel()
 	// Thing of schema1 implements one interface
 	// Thing of schema2 implements two interfaces
 
 	schema1, err := graphql.LoadSchema(
-		//language=GRAPHQL
 		`
 		type Query {
 			node(id: ID!): Node
@@ -929,7 +956,6 @@ func TestMergeSchemaDifferentSetsOfInterfaces(t *testing.T) {
 	`)
 	assert.Nil(t, err)
 	schema2, err := graphql.LoadSchema(
-		//language=GRAPHQL
 		`
 		type Query {
 			node(id: ID!): Node
@@ -957,4 +983,1005 @@ func TestMergeSchemaDifferentSetsOfInterfaces(t *testing.T) {
 		{Schema: schema1, URL: "url2"},
 	})
 	assert.Nil(t, err)
+}
+
+func TestMergeSchema_flexibleDeterministicMerges(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name         string
+		schemas      []string
+		expectSchema string
+	}{
+		{
+			name: "Conflicting field descriptions",
+			schemas: []string{
+				`
+				type User {
+					"description"
+					firstName: String!
+				}
+			`,
+				`
+				type User {
+					"other-description"
+					firstName: String!
+				}
+			`,
+			},
+			expectSchema: `
+interface Node {
+	id: ID!
+}
+type Query {
+	node(id: ID!): Node
+}
+type User {
+	"""
+	description
+	"""
+	firstName: String!
+}
+`,
+		},
+		{
+			name: "Conflicting field descriptions, first non-empty wins",
+			schemas: []string{
+				`
+				type User {
+					firstName: String!
+				}
+			`,
+				`
+				type User {
+					"description"
+					firstName: String!
+				}
+			`,
+			},
+			expectSchema: `
+interface Node {
+	id: ID!
+}
+type Query {
+	node(id: ID!): Node
+}
+type User {
+	"""
+	description
+	"""
+	firstName: String!
+}
+`,
+		},
+		{
+			name: "Conflicting type descriptions",
+			schemas: []string{
+				`
+				"User represents a customer"
+				type User {
+					firstName: String!
+				}
+			`,
+				`
+				"User represents a customer or a bot"
+				type User {
+					firstName: String!
+				}
+			`,
+			},
+			expectSchema: `
+interface Node {
+	id: ID!
+}
+type Query {
+	node(id: ID!): Node
+}
+"""
+User represents a customer
+"""
+type User {
+	firstName: String!
+}
+`,
+		},
+		{
+			name: "Conflicting type descriptions, first non-empty wins",
+			schemas: []string{
+				`
+				type User {
+					firstName: String!
+				}
+			`,
+				`
+				"User represents a customer"
+				type User {
+					firstName: String!
+				}
+			`,
+			},
+			expectSchema: `
+interface Node {
+	id: ID!
+}
+type Query {
+	node(id: ID!): Node
+}
+"""
+User represents a customer
+"""
+type User {
+	firstName: String!
+}
+`,
+		},
+		{
+			name: "Different directive description",
+			schemas: []string{
+				`
+				"other-description"
+				directive @foo on FIELD_DEFINITION
+			`,
+				`
+				"description"
+				directive @foo on FIELD_DEFINITION
+			`,
+			},
+			expectSchema: `
+"""
+other-description
+"""
+directive @foo on FIELD_DEFINITION
+interface Node {
+	id: ID!
+}
+type Query {
+	node(id: ID!): Node
+}
+`,
+		},
+		{
+			name: "Different directive description, first non-empty wins",
+			schemas: []string{
+				`
+				directive @foo on FIELD_DEFINITION
+			`,
+				`
+				"description"
+				directive @foo on FIELD_DEFINITION
+			`,
+			},
+			expectSchema: `
+"""
+description
+"""
+directive @foo on FIELD_DEFINITION
+interface Node {
+	id: ID!
+}
+type Query {
+	node(id: ID!): Node
+}
+`,
+		},
+		{
+			name: "Conflicting enum value descriptions",
+			schemas: []string{
+				`
+				enum Foo {
+					"description"
+					Bar
+				}
+			`,
+				`
+				enum Foo {
+					"other-description"
+					Bar
+				}
+			`,
+			},
+			expectSchema: `
+enum Foo {
+	"""
+	description
+	"""
+	Bar
+}
+interface Node {
+	id: ID!
+}
+type Query {
+	node(id: ID!): Node
+}
+`,
+		},
+		{
+			name: "Conflicting enum value descriptions, first non-empty wins",
+			schemas: []string{
+				`
+				enum Foo {
+					Bar
+				}
+			`,
+				`
+				enum Foo {
+					"description"
+					Bar
+				}
+			`,
+			},
+			expectSchema: `
+enum Foo {
+	"""
+	description
+	"""
+	Bar
+}
+interface Node {
+	id: ID!
+}
+type Query {
+	node(id: ID!): Node
+}
+`,
+		},
+		{
+			name: "Conflicting enum descriptions",
+			schemas: []string{
+				`
+				"description"
+				enum Foo {
+					Bar
+				}
+			`,
+				`
+				"other-description"
+				enum Foo {
+					Bar
+				}
+			`,
+			},
+			expectSchema: `
+"""
+description
+"""
+enum Foo {
+	Bar
+}
+interface Node {
+	id: ID!
+}
+type Query {
+	node(id: ID!): Node
+}
+`,
+		},
+		{
+			name: "Conflicting enum descriptions, first non-empty wins",
+			schemas: []string{
+				`
+				enum Foo {
+					Bar
+				}
+			`,
+				`
+				"description"
+				enum Foo {
+					Bar
+				}
+			`,
+			},
+			expectSchema: `
+"""
+description
+"""
+enum Foo {
+	Bar
+}
+interface Node {
+	id: ID!
+}
+type Query {
+	node(id: ID!): Node
+}
+`,
+		},
+		{
+			name: "Conflicting interface descriptions",
+			schemas: []string{
+				`
+				"description"
+				interface Foo {
+					name: String
+				}
+			`,
+				`
+				"other-description"
+				interface Foo {
+					name: String
+				}
+			`,
+			},
+			expectSchema: `
+"""
+description
+"""
+interface Foo {
+	name: String
+}
+interface Node {
+	id: ID!
+}
+type Query {
+	node(id: ID!): Node
+}
+`,
+		},
+		{
+			name: "Conflicting interface descriptions, first non-empty wins",
+			schemas: []string{
+				`
+				interface Foo {
+					name: String
+				}
+			`,
+				`
+				"description"
+				interface Foo {
+					name: String
+				}
+			`,
+			},
+			expectSchema: `
+"""
+description
+"""
+interface Foo {
+	name: String
+}
+interface Node {
+	id: ID!
+}
+type Query {
+	node(id: ID!): Node
+}
+`,
+		},
+		{
+			name: "Conflicting argument descriptions",
+			schemas: []string{
+				`
+				type Foo {
+					name(
+						"description"
+						arg1: String
+					): String
+				}
+			`,
+				`
+				type Foo {
+					name(
+						"other-description"
+						arg1: String
+					): String
+				}
+			`,
+			},
+			expectSchema: `
+type Foo {
+	name(
+		"""
+		description
+		"""
+		arg1: String
+	): String
+}
+interface Node {
+	id: ID!
+}
+type Query {
+	node(id: ID!): Node
+}
+`,
+		},
+		{
+			name: "Conflicting argument descriptions, first non-empty wins",
+			schemas: []string{
+				`
+				type Foo {
+					name(
+						arg1: String
+					): String
+				}
+			`,
+				`
+				type Foo {
+					name(
+						"description"
+						arg1: String
+					): String
+				}
+			`,
+			},
+			expectSchema: `
+type Foo {
+	name(
+		"""
+		description
+		"""
+		arg1: String
+	): String
+}
+interface Node {
+	id: ID!
+}
+type Query {
+	node(id: ID!): Node
+}
+`,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			if len(tc.schemas) < 1 {
+				t.Fatal("Test case must include 1 or more schemas")
+			}
+			currentSchema, err := graphql.LoadSchema(tc.schemas[0])
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			for _, s := range tc.schemas[1:] {
+				currentSchema, err = testMergeSchemas(t, currentSchema, s)
+				if err != nil {
+					t.Fatal(err)
+				}
+			}
+			var currentSchemaBuf bytes.Buffer
+			formatter.NewFormatter(&currentSchemaBuf).FormatSchema(currentSchema)
+			currentSchemaStr := strings.TrimSpace(currentSchemaBuf.String())
+			assert.Equal(t, strings.TrimSpace(tc.expectSchema), currentSchemaStr)
+		})
+	}
+}
+
+func TestMergeSchema_multipleInterfaces(t *testing.T) {
+	t.Parallel()
+	currentSchema, err := graphql.LoadSchema(`
+		interface Node {
+			id: ID!
+		}
+
+		interface Foo {
+			foo: String
+		}
+
+		type Bar implements Node & Foo {
+			id: ID!
+			foo: String
+		}
+	`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	currentSchema, err = testMergeSchemas(t, currentSchema, `
+		interface Node {
+			id: ID!
+		}
+
+		interface Baz {
+			baz: String
+		}
+
+		type Bar implements Node & Baz {
+			id: ID!
+			baz: String
+		}
+	`)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var currentSchemaBuf bytes.Buffer
+	formatter.NewFormatter(&currentSchemaBuf).FormatSchema(currentSchema)
+	currentSchemaStr := strings.TrimSpace(currentSchemaBuf.String())
+	assert.Equal(t, strings.TrimSpace(`
+type Bar implements Baz & Foo & Node {
+	id: ID!
+	foo: String
+	baz: String
+}
+interface Baz {
+	baz: String
+}
+interface Foo {
+	foo: String
+}
+interface Node {
+	id: ID!
+}
+type Query {
+	node(id: ID!): Node
+}
+`), currentSchemaStr)
+}
+
+func TestMergeSchema_directiveLocations(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		description        string
+		schema1, schema2   string
+		expectMergedSchema string
+		expectErr          string
+	}{
+		{
+			description: "same locations",
+			schema1:     `directive @foo on INPUT_OBJECT | INPUT_FIELD_DEFINITION`,
+			schema2:     `directive @foo on INPUT_OBJECT | INPUT_FIELD_DEFINITION`,
+			expectMergedSchema: `
+directive @foo on INPUT_FIELD_DEFINITION | INPUT_OBJECT
+interface Node {
+	id: ID!
+}
+type Query {
+	node(id: ID!): Node
+}
+`,
+		},
+		{
+			description: "merge type system locations",
+			schema1:     `directive @foo on SCHEMA | OBJECT`,
+			schema2:     `directive @foo on SCALAR | OBJECT`,
+			expectMergedSchema: `
+directive @foo on OBJECT | SCALAR | SCHEMA
+interface Node {
+	id: ID!
+}
+type Query {
+	node(id: ID!): Node
+}
+`,
+		},
+		{
+			description: "do not merge executable locations",
+			schema1:     `directive @foo on FIELD | QUERY`,
+			schema2:     `directive @foo on FRAGMENT_DEFINITION | QUERY`,
+			expectErr:   `@foo (directive): conflict in locations: do not have the same executable locations: exclusive to first = [FIELD], exclusive to second = [FRAGMENT_DEFINITION]`,
+		},
+		{
+			description: "merge shared executable locations and mixed type system locations",
+			schema1:     `directive @foo on FIELD | SCHEMA | OBJECT`,
+			schema2:     `directive @foo on FIELD | SCALAR`,
+			expectMergedSchema: `
+directive @foo on FIELD | OBJECT | SCALAR | SCHEMA
+interface Node {
+	id: ID!
+}
+type Query {
+	node(id: ID!): Node
+}
+`,
+		},
+	} {
+		t.Run(tc.description, func(t *testing.T) {
+			t.Parallel()
+			currentSchema, err := graphql.LoadSchema(tc.schema1)
+			if err != nil {
+				t.Fatal(err)
+			}
+			currentSchema, err = testMergeSchemas(t, currentSchema, tc.schema2)
+			if tc.expectErr != "" {
+				assert.EqualError(t, err, tc.expectErr)
+				return
+			}
+			require.NoError(t, err)
+
+			var currentSchemaBuf bytes.Buffer
+			formatter.NewFormatter(&currentSchemaBuf).FormatSchema(currentSchema)
+			currentSchemaStr := strings.TrimSpace(currentSchemaBuf.String())
+			assert.Equal(t, strings.TrimSpace(tc.expectMergedSchema), currentSchemaStr)
+		})
+	}
+}
+
+func TestMergeSchema_directives(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		description        string
+		schema1, schema2   string
+		expectMergedSchema string
+		expectErr          string
+	}{
+		{
+			description: "identical custom directives on type",
+			schema1: `
+directive @foo on OBJECT
+
+type Bar @foo {
+	baz: String
+}
+`,
+			schema2: `
+directive @foo on OBJECT
+
+type Bar @foo {
+	baz: String
+}
+`,
+			expectMergedSchema: `
+directive @foo on OBJECT
+type Bar @foo {
+	baz: String
+}
+interface Node {
+	id: ID!
+}
+type Query {
+	node(id: ID!): Node
+}
+`,
+		},
+		{
+			description: "custom directives only on first schema type",
+			schema1: `
+directive @foo on OBJECT
+
+type Bar @foo {
+	baz: String
+}
+`,
+			schema2: `
+type Bar {
+	baz: String
+}
+`,
+			expectMergedSchema: `
+directive @foo on OBJECT
+type Bar @foo {
+	baz: String
+}
+interface Node {
+	id: ID!
+}
+type Query {
+	node(id: ID!): Node
+}
+`,
+		},
+		{
+			description: "custom directives only on second schema type",
+			schema1: `
+type Bar {
+	baz: String
+}
+`,
+			schema2: `
+directive @foo on OBJECT
+
+type Bar @foo {
+	baz: String
+}
+`,
+			expectMergedSchema: `
+directive @foo on OBJECT
+type Bar @foo {
+	baz: String
+}
+interface Node {
+	id: ID!
+}
+type Query {
+	node(id: ID!): Node
+}
+`,
+		},
+		{
+			description: "identical custom directives on both schemas type",
+			schema1: `
+directive @foo on OBJECT
+
+type Bar @foo {
+	baz: String
+}
+`,
+			schema2: `
+directive @foo on OBJECT
+
+type Bar @foo {
+	baz: String
+}
+`,
+			expectMergedSchema: `
+directive @foo on OBJECT
+type Bar @foo {
+	baz: String
+}
+interface Node {
+	id: ID!
+}
+type Query {
+	node(id: ID!): Node
+}
+`,
+		},
+		{
+			description: "repeated custom directives on first schemas type",
+			schema1: `
+directive @foo repeatable on OBJECT
+
+type Bar @foo @foo {
+	baz: String
+}
+`,
+			schema2: `
+type Bar {
+	baz: String
+}
+`,
+			expectMergedSchema: `
+directive @foo repeatable on OBJECT
+type Bar @foo @foo {
+	baz: String
+}
+interface Node {
+	id: ID!
+}
+type Query {
+	node(id: ID!): Node
+}
+`,
+		},
+		{
+			description: "different built-in and custom directives on both schemas field definition",
+			schema1: `
+type Biff {
+	biff: String @deprecated
+}
+`,
+			schema2: `
+directive @foo on FIELD_DEFINITION
+type Biff {
+	biff: String @foo
+}
+`,
+			expectMergedSchema: `
+directive @foo on FIELD_DEFINITION
+type Biff {
+	biff: String @deprecated @foo
+}
+interface Node {
+	id: ID!
+}
+type Query {
+	node(id: ID!): Node
+}
+`,
+		},
+		{
+			description: "many repeated and unique custom directives on both schemas type",
+			schema1: `
+directive @foo(bar: Int!) repeatable on OBJECT
+directive @baz on OBJECT
+
+type Biff @foo(bar: 1) @baz @foo(bar: 2) {
+	biff: String
+}
+`,
+			schema2: `
+directive @foo(bar: Int!) repeatable on OBJECT
+directive @baz on OBJECT
+
+type Biff @foo(bar: 1) @baz @foo(bar: 2) {
+	biff: String
+}
+`,
+			expectMergedSchema: `
+directive @baz on OBJECT
+directive @foo(bar: Int!) repeatable on OBJECT
+type Biff @foo(bar: 1) @baz @foo(bar: 2) {
+	biff: String
+}
+interface Node {
+	id: ID!
+}
+type Query {
+	node(id: ID!): Node
+}
+`,
+		},
+		{
+			description: "custom directive lists of different length on both schemas type",
+			schema1: `
+directive @foo on OBJECT
+directive @baz on OBJECT
+
+type Biff @foo {
+	biff: String
+}
+`,
+			schema2: `
+directive @foo on OBJECT
+directive @baz on OBJECT
+
+type Biff @foo @baz {
+	biff: String
+}
+`,
+			expectErr: `Biff (OBJECT): directives with potentially significant ordering were not of the same length: @foo != @foo @baz`,
+		},
+		{
+			description: "differently ordered built-in and custom directive lists on different schemas",
+			schema1: `
+directive @foo on FIELD_DEFINITION
+directive @bar on FIELD_DEFINITION
+
+type Biff {
+	biff: String @foo @bar @deprecated
+}
+`,
+			schema2: `
+directive @foo on FIELD_DEFINITION
+directive @bar on FIELD_DEFINITION
+
+type Biff {
+	biff: String @foo @deprecated @bar
+}
+`,
+			expectMergedSchema: `
+directive @bar on FIELD_DEFINITION
+directive @foo on FIELD_DEFINITION
+type Biff {
+	biff: String @deprecated @foo @bar
+}
+interface Node {
+	id: ID!
+}
+type Query {
+	node(id: ID!): Node
+}
+`,
+		},
+		{
+			description: "different built-in and custom directive lists on different schemas",
+			schema1: `
+directive @foo on FIELD_DEFINITION
+
+type Biff {
+	biff: String @foo
+}
+`,
+			schema2: `
+type Biff {
+	biff: String @deprecated
+}
+`,
+			expectMergedSchema: `
+directive @foo on FIELD_DEFINITION
+type Biff {
+	biff: String @deprecated @foo
+}
+interface Node {
+	id: ID!
+}
+type Query {
+	node(id: ID!): Node
+}
+`,
+		},
+		{
+			description: "different custom directive lists of equal length on both schemas type",
+			schema1: `
+directive @foo(bar: Int!) repeatable on OBJECT
+
+type Biff @foo(bar: 1) @foo(bar: 2) {
+	biff: String
+}
+`,
+			schema2: `
+directive @foo(bar: Int!) repeatable on OBJECT
+
+type Biff @foo(bar: 2) @foo(bar: 1) {
+	biff: String
+}
+`,
+			expectErr: `Biff (OBJECT): directives with potentially significant ordering at index #0 are not equal: @foo(bar: 1) @foo(bar: 2) != @foo(bar: 2) @foo(bar: 1): argument "bar" values are not equal: encountered different raw values: 1 != 2`,
+		},
+		{
+			description: "differently ordered custom directive lists of equal length on both schemas type",
+			schema1: `
+directive @foo on OBJECT
+directive @baz on OBJECT
+
+type Biff @foo @baz {
+	biff: String
+}
+`,
+			schema2: `
+directive @foo on OBJECT
+directive @baz on OBJECT
+
+type Biff @baz @foo {
+	biff: String
+}
+`,
+			expectErr: `Biff (OBJECT): directives with potentially significant ordering at index #0 are not equal: @foo @baz != @baz @foo: directives do not have the same name`,
+		},
+		{
+			description: "non-repeatable directive used twice with different arguments",
+			schema1: `
+scalar Biff @specifiedBy(url: "foo")
+`,
+			schema2: `
+scalar Biff @specifiedBy(url: "bar")
+`,
+			expectErr: `Biff (SCALAR): conflict in scalar value directives: cannot merge unordered directives in '@specifiedBy(url: "foo")' and '@specifiedBy(url: "bar")': found unique, non-repeatable directive: @specifiedBy(url: "bar")`,
+		},
+	} {
+		t.Run(tc.description, func(t *testing.T) {
+			t.Parallel()
+			currentSchema, err := graphql.LoadSchema(tc.schema1)
+			if err != nil {
+				t.Fatal(err)
+			}
+			currentSchema, err = testMergeSchemas(t, currentSchema, tc.schema2)
+			if tc.expectErr != "" {
+				assert.EqualError(t, err, tc.expectErr)
+				return
+			}
+			require.NoError(t, err)
+
+			var currentSchemaBuf bytes.Buffer
+			formatter.NewFormatter(&currentSchemaBuf).FormatSchema(currentSchema)
+			currentSchemaStr := strings.TrimSpace(currentSchemaBuf.String())
+			assert.Equal(t, strings.TrimSpace(tc.expectMergedSchema), currentSchemaStr)
+		})
+	}
+}
+
+func TestDiffSets(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		description                     string
+		left, right                     iter.Seq[int]
+		expectOnlyLeft, expectOnlyRight []int
+		expectAreEqualSets              bool
+	}{
+		{
+			description:        "equal sets",
+			left:               slices.Values([]int{1, 2, 3}),
+			right:              slices.Values([]int{1, 2, 3}),
+			expectAreEqualSets: true,
+		},
+		{
+			description:    "unique in left",
+			left:           slices.Values([]int{1, 2, 3, 4}),
+			right:          slices.Values([]int{1, 2, 3}),
+			expectOnlyLeft: []int{4},
+		},
+		{
+			description:     "unique in right",
+			left:            slices.Values([]int{1, 2, 3}),
+			right:           slices.Values([]int{1, 2, 3, 4}),
+			expectOnlyRight: []int{4},
+		},
+		{
+			description:    "unique in left stable ordering",
+			left:           slices.Values([]int{1, 2, 3, 4}),
+			right:          slices.Values([]int{1, 3}),
+			expectOnlyLeft: []int{2, 4},
+		},
+		{
+			description:     "unique in right stable ordering",
+			left:            slices.Values([]int{1, 3}),
+			right:           slices.Values([]int{1, 2, 3, 4}),
+			expectOnlyRight: []int{2, 4},
+		},
+	} {
+		t.Run(tc.description, func(t *testing.T) {
+			t.Parallel()
+			onlyLeft, onlyRight, areEqualSets := diffSets(tc.left, tc.right)
+			assert.Equal(t, tc.expectOnlyLeft, onlyLeft)
+			assert.Equal(t, tc.expectOnlyRight, onlyRight)
+			assert.Equal(t, tc.expectAreEqualSets, areEqualSets)
+		})
+	}
 }

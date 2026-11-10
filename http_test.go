@@ -7,7 +7,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"io/ioutil"
 	"mime/multipart"
 	"net/http"
 	"net/http/httptest"
@@ -15,6 +14,7 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+	"time"
 
 	"golang.org/x/net/html"
 
@@ -31,11 +31,13 @@ type resultWithErrors struct {
 }
 
 func TestGraphQLHandler_postMissingQuery(t *testing.T) {
+	t.Parallel()
 	schema, err := graphql.LoadSchema(`
 		type Query {
 			allUsers: [String!]!
 		}
 	`)
+	assert.NoError(t, err)
 
 	// create gateway schema we can test against
 	gateway, err := New([]*graphql.RemoteSchema{
@@ -46,7 +48,7 @@ func TestGraphQLHandler_postMissingQuery(t *testing.T) {
 		return
 	}
 	// the incoming request
-	request := httptest.NewRequest("POST", "/graphql", strings.NewReader(`
+	request := httptest.NewRequestWithContext(t.Context(), http.MethodPost, "/graphql", strings.NewReader(`
 		{
 			"query": ""
 		}
@@ -58,10 +60,13 @@ func TestGraphQLHandler_postMissingQuery(t *testing.T) {
 	gateway.GraphQLHandler(responseRecorder, request)
 
 	// make sure we got an error code
-	assert.Equal(t, http.StatusUnprocessableEntity, responseRecorder.Result().StatusCode)
+	result := responseRecorder.Result()
+	assert.NoError(t, result.Body.Close())
+	assert.Equal(t, http.StatusUnprocessableEntity, result.StatusCode)
 }
 
 func TestGraphQLHandler(t *testing.T) {
+	t.Parallel()
 	schema, _ := graphql.LoadSchema(`
 		type Query {
 			allUsers: [String!]!
@@ -78,15 +83,15 @@ func TestGraphQLHandler(t *testing.T) {
 			}, nil
 		},
 	)))
-
 	if err != nil {
 		t.Error(err.Error())
 		return
 	}
 
 	t.Run("Missing query", func(t *testing.T) {
+		t.Parallel()
 		// the incoming request
-		request := httptest.NewRequest("GET", "/graphql", strings.NewReader(""))
+		request := httptest.NewRequestWithContext(t.Context(), http.MethodGet, "/graphql", strings.NewReader(""))
 		// a recorder so we can check what the handler responded with
 		responseRecorder := httptest.NewRecorder()
 
@@ -94,7 +99,9 @@ func TestGraphQLHandler(t *testing.T) {
 		gateway.GraphQLHandler(responseRecorder, request)
 
 		// make sure we got an error code
-		assert.Equal(t, http.StatusUnprocessableEntity, responseRecorder.Result().StatusCode)
+		recorderResult := responseRecorder.Result()
+		assert.NoError(t, recorderResult.Body.Close())
+		assert.Equal(t, http.StatusUnprocessableEntity, recorderResult.StatusCode)
 
 		// verify the graphql error code
 		result, err := readResultWithErrors(responseRecorder, t)
@@ -105,8 +112,9 @@ func TestGraphQLHandler(t *testing.T) {
 	})
 
 	t.Run("Non-object variables fails", func(t *testing.T) {
+		t.Parallel()
 		// the incoming request
-		request := httptest.NewRequest("GET", `/graphql?query={allUsers}&variables=true`, strings.NewReader(""))
+		request := httptest.NewRequestWithContext(t.Context(), http.MethodGet, `/graphql?query={allUsers}&variables=true`, strings.NewReader(""))
 
 		// a recorder so we can check what the handler responded with
 		responseRecorder := httptest.NewRecorder()
@@ -114,12 +122,15 @@ func TestGraphQLHandler(t *testing.T) {
 		gateway.GraphQLHandler(responseRecorder, request)
 
 		// make sure we got an error code
-		assert.Equal(t, http.StatusUnprocessableEntity, responseRecorder.Result().StatusCode)
+		result := responseRecorder.Result()
+		assert.NoError(t, result.Body.Close())
+		assert.Equal(t, http.StatusUnprocessableEntity, result.StatusCode)
 	})
 
 	t.Run("Object variables succeeds", func(t *testing.T) {
+		t.Parallel()
 		// the incoming request
-		request := httptest.NewRequest("GET", `/graphql?query={allUsers}&variables={"foo":2}`, strings.NewReader(""))
+		request := httptest.NewRequestWithContext(t.Context(), http.MethodGet, `/graphql?query={allUsers}&variables={"foo":2}`, strings.NewReader(""))
 		// a recorder so we can check what the handler responded with
 		responseRecorder := httptest.NewRecorder()
 
@@ -127,12 +138,15 @@ func TestGraphQLHandler(t *testing.T) {
 		gateway.GraphQLHandler(responseRecorder, request)
 
 		// make sure we got an error code
-		assert.Equal(t, http.StatusOK, responseRecorder.Result().StatusCode)
+		result := responseRecorder.Result()
+		assert.NoError(t, result.Body.Close())
+		assert.Equal(t, http.StatusOK, result.StatusCode)
 	})
 
 	t.Run("OperationName", func(t *testing.T) {
+		t.Parallel()
 		// the incoming request
-		request := httptest.NewRequest("GET", `/graphql?query={allusers}&operationName=Hello`, strings.NewReader(""))
+		request := httptest.NewRequestWithContext(t.Context(), http.MethodGet, `/graphql?query={allusers}&operationName=Hello`, strings.NewReader(""))
 		// a recorder so we can check what the handler responded with
 		responseRecorder := httptest.NewRecorder()
 
@@ -140,10 +154,13 @@ func TestGraphQLHandler(t *testing.T) {
 		gateway.GraphQLHandler(responseRecorder, request)
 
 		// make sure we got an error code
-		assert.Equal(t, http.StatusBadRequest, responseRecorder.Result().StatusCode)
+		result := responseRecorder.Result()
+		assert.NoError(t, result.Body.Close())
+		assert.Equal(t, http.StatusBadRequest, result.StatusCode)
 	})
 
 	t.Run("error marhsalling response", func(t *testing.T) {
+		t.Parallel()
 		// create gateway schema we can test against
 		innerGateway, err := New([]*graphql.RemoteSchema{
 			{Schema: schema, URL: "url1"},
@@ -154,14 +171,13 @@ func TestGraphQLHandler(t *testing.T) {
 				}, nil
 			},
 		)))
-
 		if err != nil {
 			t.Error(err.Error())
 			return
 		}
 
 		// the incoming request
-		request := httptest.NewRequest("GET", `/graphql?query={allUsers}`, strings.NewReader(""))
+		request := httptest.NewRequestWithContext(t.Context(), http.MethodGet, `/graphql?query={allUsers}`, strings.NewReader(""))
 		// a recorder so we can check what the handler responded with
 		responseRecorder := httptest.NewRecorder()
 
@@ -169,7 +185,9 @@ func TestGraphQLHandler(t *testing.T) {
 		innerGateway.GraphQLHandler(responseRecorder, request)
 
 		// make sure we got an error code
-		assert.Equal(t, http.StatusInternalServerError, responseRecorder.Result().StatusCode)
+		recorderResult := responseRecorder.Result()
+		assert.NoError(t, recorderResult.Body.Close())
+		assert.Equal(t, http.StatusInternalServerError, recorderResult.StatusCode)
 
 		// verify the graphql error code
 		result, err := readResultWithErrors(responseRecorder, t)
@@ -180,6 +198,7 @@ func TestGraphQLHandler(t *testing.T) {
 	})
 
 	t.Run("internal server error response", func(t *testing.T) {
+		t.Parallel()
 		// create gateway schema we can test against
 		innerGateway, err := New([]*graphql.RemoteSchema{
 			{Schema: schema, URL: "url1"},
@@ -188,14 +207,13 @@ func TestGraphQLHandler(t *testing.T) {
 				return nil, errors.New("error string")
 			},
 		)))
-
 		if err != nil {
 			t.Error(err.Error())
 			return
 		}
 
 		// the incoming request
-		request := httptest.NewRequest("GET", `/graphql?query={allUsers}`, strings.NewReader(""))
+		request := httptest.NewRequestWithContext(t.Context(), http.MethodGet, `/graphql?query={allUsers}`, strings.NewReader(""))
 		// a recorder so we can check what the handler responded with
 		responseRecorder := httptest.NewRecorder()
 
@@ -203,7 +221,9 @@ func TestGraphQLHandler(t *testing.T) {
 		innerGateway.GraphQLHandler(responseRecorder, request)
 
 		// make sure we got an error code
-		assert.Equal(t, http.StatusOK, responseRecorder.Result().StatusCode)
+		recorderResult := responseRecorder.Result()
+		assert.NoError(t, recorderResult.Body.Close())
+		assert.Equal(t, http.StatusOK, recorderResult.StatusCode)
 
 		// verify the graphql error code
 		result, err := readResultWithErrors(responseRecorder, t)
@@ -215,18 +235,21 @@ func TestGraphQLHandler(t *testing.T) {
 }
 
 func readResultWithErrors(responseRecorder *httptest.ResponseRecorder, t *testing.T) (*resultWithErrors, error) {
-	body, err := ioutil.ReadAll(responseRecorder.Result().Body)
+	t.Helper()
+	recorderResult := responseRecorder.Result()
+	defer recorderResult.Body.Close()
+	body, err := io.ReadAll(recorderResult.Body)
 	if err != nil {
 		return nil, err
 	}
 
-	//result := map[string]interface{}{}
 	result := resultWithErrors{}
 	err = json.Unmarshal(body, &result)
-	return &result, nil
+	return &result, err
 }
 
 func TestQueryPlanCacheParameters_post(t *testing.T) {
+	t.Parallel()
 	// load the schema we'll test
 	schema, _ := graphql.LoadSchema(`
 		type Query {
@@ -253,7 +276,7 @@ func TestQueryPlanCacheParameters_post(t *testing.T) {
 	}
 
 	// make a request for an unknown persisted query
-	request := httptest.NewRequest("POST", "/graphql", strings.NewReader(`
+	request := httptest.NewRequestWithContext(t.Context(), http.MethodPost, "/graphql", strings.NewReader(`
 		{
 			"extensions": {
 				"persistedQuery": {
@@ -295,7 +318,7 @@ func TestQueryPlanCacheParameters_post(t *testing.T) {
 	}
 
 	// passing in a valid query along with the hash
-	request = httptest.NewRequest("POST", "/graphql", strings.NewReader(`
+	request = httptest.NewRequestWithContext(t.Context(), http.MethodPost, "/graphql", strings.NewReader(`
 		{
 			"query": "{ allUsers }",
 			"extensions": {
@@ -342,6 +365,7 @@ func TestQueryPlanCacheParameters_post(t *testing.T) {
 }
 
 func TestQueryPlanCacheParameters_get(t *testing.T) {
+	t.Parallel()
 	// load the schema we'll test
 	schema, _ := graphql.LoadSchema(`
 		type Query {
@@ -368,9 +392,9 @@ func TestQueryPlanCacheParameters_get(t *testing.T) {
 	}
 
 	// make a request for an unknown persisted query
-	// request := httptesot.NewRequest("POST", "/graphql?extensions={\"persistedQuery\": {\"version\": 1, \"sha256Hash\": \"1234\"}}", strings.NewReader(""))
+	// request := httptesot.NewRequestWithContext(t.Context(), http.MethodPost, "/graphql?extensions={\"persistedQuery\": {\"version\": 1, \"sha256Hash\": \"1234\"}}", strings.NewReader(""))
 	request := &http.Request{
-		Method: "GET",
+		Method: http.MethodGet,
 		URL: &url.URL{
 			RawPath:  "/graphql",
 			RawQuery: "extensions={\"persistedQuery\": {\"version\": 1, \"sha256Hash\": \"1234\"}}",
@@ -409,6 +433,7 @@ func TestQueryPlanCacheParameters_get(t *testing.T) {
 }
 
 func TestPlaygroundHandler_postRequest(t *testing.T) {
+	t.Parallel()
 	// a planner that always returns an error
 	planner := &MockErrPlanner{Err: errors.New("Planning error")}
 
@@ -418,6 +443,7 @@ func TestPlaygroundHandler_postRequest(t *testing.T) {
 			allUsers: [String!]!
 		}
 	`)
+	assert.NoError(t, err)
 	schemas := []*graphql.RemoteSchema{{Schema: schema, URL: "url1"}}
 
 	// create gateway schema we can test against
@@ -427,7 +453,7 @@ func TestPlaygroundHandler_postRequest(t *testing.T) {
 		return
 	}
 	// the incoming request
-	request := httptest.NewRequest("POST", "/graphql", strings.NewReader(`
+	request := httptest.NewRequestWithContext(t.Context(), http.MethodPost, "/graphql", strings.NewReader(`
 		{
 			"query": "{ allUsers }"
 		}
@@ -440,8 +466,9 @@ func TestPlaygroundHandler_postRequest(t *testing.T) {
 
 	// get the response from the handler
 	response := responseRecorder.Result()
+	defer response.Body.Close()
 	// read the body
-	_, err = ioutil.ReadAll(response.Body)
+	_, err = io.ReadAll(response.Body)
 	if err != nil {
 		t.Error(err.Error())
 		return
@@ -452,6 +479,7 @@ func TestPlaygroundHandler_postRequest(t *testing.T) {
 }
 
 func TestPlaygroundHandler_postRequestList(t *testing.T) {
+	t.Parallel()
 	// and some schemas that the gateway wraps
 	schema, err := graphql.LoadSchema(`
 		type User {
@@ -467,14 +495,14 @@ func TestPlaygroundHandler_postRequestList(t *testing.T) {
 	aField := &QueryField{
 		Name: "a",
 		Type: ast.NamedType("User", &ast.Position{}),
-		Resolver: func(ctx context.Context, arguments map[string]interface{}) (string, error) {
+		Resolver: func(context.Context, map[string]interface{}) (string, error) {
 			return "a", nil
 		},
 	}
 	bField := &QueryField{
 		Name: "b",
 		Type: ast.NamedType("User", &ast.Position{}),
-		Resolver: func(ctx context.Context, arguments map[string]interface{}) (string, error) {
+		Resolver: func(context.Context, map[string]interface{}) (string, error) {
 			return "b", nil
 		},
 	}
@@ -489,7 +517,7 @@ func TestPlaygroundHandler_postRequestList(t *testing.T) {
 	// we need to send a list of two queries ({ a } and { b }) and make sure they resolve in the right order
 
 	// the incoming request
-	request := httptest.NewRequest("POST", "/graphql", strings.NewReader(`
+	request := httptest.NewRequestWithContext(t.Context(), http.MethodPost, "/graphql", strings.NewReader(`
 		[
 			{
 				"query": "{ a { id } }"
@@ -506,6 +534,7 @@ func TestPlaygroundHandler_postRequestList(t *testing.T) {
 	gw.PlaygroundHandler(responseRecorder, request)
 	// get the response from the handler
 	response := responseRecorder.Result()
+	defer response.Body.Close()
 
 	// make sure we got a successful response
 	if !assert.Equal(t, http.StatusOK, response.StatusCode) {
@@ -513,7 +542,7 @@ func TestPlaygroundHandler_postRequestList(t *testing.T) {
 	}
 
 	// read the body
-	body, err := ioutil.ReadAll(response.Body)
+	body, err := io.ReadAll(response.Body)
 	if err != nil {
 		t.Error(err.Error())
 		return
@@ -545,6 +574,7 @@ func TestPlaygroundHandler_postRequestList(t *testing.T) {
 }
 
 func TestPlaygroundHandler_getRequest(t *testing.T) {
+	t.Parallel()
 	// a planner that always returns an error
 	planner := &MockErrPlanner{Err: errors.New("Planning error")}
 
@@ -554,6 +584,7 @@ func TestPlaygroundHandler_getRequest(t *testing.T) {
 			allUsers: [String!]!
 		}
 	`)
+	assert.NoError(t, err)
 	schemas := []*graphql.RemoteSchema{{Schema: schema, URL: "url1"}}
 
 	// create gateway schema we can test against
@@ -563,15 +594,16 @@ func TestPlaygroundHandler_getRequest(t *testing.T) {
 		return
 	}
 	// the incoming request
-	request := httptest.NewRequest("GET", "/graphql", strings.NewReader(``))
+	request := httptest.NewRequestWithContext(t.Context(), http.MethodGet, "/graphql", strings.NewReader(``))
 	// a recorder so we can check what the handler responded with
 	responseRecorder := httptest.NewRecorder()
 
 	// call the http hander
 	gateway.PlaygroundHandler(responseRecorder, request)
 
-	_, err = html.Parse(responseRecorder.Result().Body)
-	defer responseRecorder.Result().Body.Close()
+	result := responseRecorder.Result()
+	_, err = html.Parse(result.Body)
+	defer result.Body.Close()
 
 	if err != nil {
 		t.Error(err.Error())
@@ -580,6 +612,7 @@ func TestPlaygroundHandler_getRequest(t *testing.T) {
 }
 
 func TestGraphQLHandler_postWithFile(t *testing.T) {
+	t.Parallel()
 	schema, err := graphql.LoadSchema(`
 		scalar Upload
 
@@ -596,6 +629,7 @@ func TestGraphQLHandler_postWithFile(t *testing.T) {
 			uploadInput(input: FileInput!): String!
 		}
 	`)
+	assert.NoError(t, err)
 
 	// create gateway schema we can test against
 	gateway, err := New([]*graphql.RemoteSchema{
@@ -608,7 +642,6 @@ func TestGraphQLHandler_postWithFile(t *testing.T) {
 			}, nil
 		},
 	)))
-
 	if err != nil {
 		t.Error(err.Error())
 		return
@@ -640,12 +673,12 @@ func TestGraphQLHandler_postWithFile(t *testing.T) {
 		},
 	} {
 		t.Run(queryTest.mess, func(t *testing.T) {
+			t.Parallel()
 			request, err := createMultipartRequest(
 				[]byte(queryTest.operations),
 				[]byte(queryTest.fileMap),
 				queryTest.file,
 			)
-
 			if err != nil {
 				t.Error(err)
 				return
@@ -657,12 +690,15 @@ func TestGraphQLHandler_postWithFile(t *testing.T) {
 			gateway.GraphQLHandler(responseRecorder, request)
 
 			// make sure we got a response code (200)
-			assert.Equal(t, http.StatusOK, responseRecorder.Result().StatusCode)
+			result := responseRecorder.Result()
+			assert.NoError(t, result.Body.Close())
+			assert.Equal(t, http.StatusOK, result.StatusCode)
 		})
 	}
 }
 
 func TestGraphQLHandler_DeeplyNestedFileInput(t *testing.T) {
+	t.Parallel()
 	schema, err := graphql.LoadSchema(`
 		scalar Upload
 
@@ -687,6 +723,7 @@ func TestGraphQLHandler_DeeplyNestedFileInput(t *testing.T) {
 			uploadInputWrapper(input: WrapperOne!): String!
 		}
 	`)
+	assert.NoError(t, err)
 
 	// create gateway schema we can test against
 	gateway, err := New([]*graphql.RemoteSchema{
@@ -698,7 +735,6 @@ func TestGraphQLHandler_DeeplyNestedFileInput(t *testing.T) {
 			}, nil
 		},
 	)))
-
 	if err != nil {
 		t.Error(err.Error())
 		return
@@ -721,12 +757,12 @@ func TestGraphQLHandler_DeeplyNestedFileInput(t *testing.T) {
 		},
 	} {
 		t.Run(queryTest.mess, func(t *testing.T) {
+			t.Parallel()
 			request, err := createMultipartRequest(
 				[]byte(queryTest.operations),
 				[]byte(queryTest.fileMap),
 				queryTest.file,
 			)
-
 			if err != nil {
 				t.Error(err)
 				return
@@ -740,12 +776,15 @@ func TestGraphQLHandler_DeeplyNestedFileInput(t *testing.T) {
 			fmt.Println(responseRecorder.Body)
 
 			// make sure we got a response code (200)
-			assert.Equal(t, http.StatusOK, responseRecorder.Result().StatusCode)
+			result := responseRecorder.Result()
+			assert.NoError(t, result.Body.Close())
+			assert.Equal(t, http.StatusOK, result.StatusCode)
 		})
 	}
 }
 
 func TestGraphQLHandler_postWithMultipleFiles(t *testing.T) {
+	t.Parallel()
 	schema, err := graphql.LoadSchema(`
 		scalar Upload
 
@@ -763,6 +802,7 @@ func TestGraphQLHandler_postWithMultipleFiles(t *testing.T) {
 			uploadMultiInput(input: FilesInput!): [String!]!
 		}
 	`)
+	assert.NoError(t, err)
 
 	// create gateway schema we can test against
 	gateway, err := New([]*graphql.RemoteSchema{
@@ -776,7 +816,6 @@ func TestGraphQLHandler_postWithMultipleFiles(t *testing.T) {
 			}, nil
 		},
 	)))
-
 	if err != nil {
 		t.Error(err.Error())
 		return
@@ -816,12 +855,12 @@ func TestGraphQLHandler_postWithMultipleFiles(t *testing.T) {
 		},
 	} {
 		t.Run(queryTest.mess, func(t *testing.T) {
+			t.Parallel()
 			request, err := createMultipartRequest(
 				[]byte(queryTest.operations),
 				[]byte(queryTest.fileMap),
 				queryTest.files...,
 			)
-
 			if err != nil {
 				t.Error(err)
 				return
@@ -833,12 +872,15 @@ func TestGraphQLHandler_postWithMultipleFiles(t *testing.T) {
 			gateway.GraphQLHandler(responseRecorder, request)
 
 			// make sure we got a response code (200)
-			assert.Equal(t, http.StatusOK, responseRecorder.Result().StatusCode)
+			result := responseRecorder.Result()
+			assert.NoError(t, result.Body.Close())
+			assert.Equal(t, http.StatusOK, result.StatusCode)
 		})
 	}
 }
 
 func TestGraphQLHandler_postBatchWithMultipleFiles(t *testing.T) {
+	t.Parallel()
 	schema, err := graphql.LoadSchema(`
 		scalar Upload
 
@@ -856,6 +898,7 @@ func TestGraphQLHandler_postBatchWithMultipleFiles(t *testing.T) {
 			uploadMultiInput(input: FilesInput!): [String!]!
 		}
 	`)
+	assert.NoError(t, err)
 
 	// create gateway schema we can test against
 	gateway, err := New([]*graphql.RemoteSchema{
@@ -869,7 +912,6 @@ func TestGraphQLHandler_postBatchWithMultipleFiles(t *testing.T) {
 			}, nil
 		},
 	)))
-
 	if err != nil {
 		t.Error(err.Error())
 		return
@@ -899,7 +941,6 @@ func TestGraphQLHandler_postBatchWithMultipleFiles(t *testing.T) {
 		[]byte("Test file content 5"),
 		[]byte("Test file content 6"),
 	)
-
 	if err != nil {
 		t.Error(err)
 		return
@@ -912,10 +953,104 @@ func TestGraphQLHandler_postBatchWithMultipleFiles(t *testing.T) {
 	gateway.GraphQLHandler(responseRecorder, request)
 
 	// make sure we got an error code
-	assert.Equal(t, http.StatusOK, responseRecorder.Result().StatusCode)
+	result := responseRecorder.Result()
+	assert.NoError(t, result.Body.Close())
+	assert.Equal(t, http.StatusOK, result.StatusCode)
+}
+
+func TestGraphQLHandler_postBatchParallel(t *testing.T) {
+	t.Parallel()
+	schema, err := graphql.LoadSchema(`
+		type Query {
+			queryA: String!
+			queryB: String!
+		}
+	`)
+	assert.NoError(t, err)
+
+	// create gateway schema we can test against
+	gateway, err := New([]*graphql.RemoteSchema{
+		{Schema: schema, URL: "url-file-upload"},
+	}, WithExecutor(ExecutorFunc(
+		func(ec *ExecutionContext) (map[string]interface{}, error) {
+			if ec.Plan.Operation.Name == "queryAOperation" {
+				time.Sleep(50 * time.Millisecond)
+				return map[string]interface{}{
+					"queryA": "resultA",
+				}, nil
+			}
+			if ec.Plan.Operation.Name == "queryBOperation" {
+				return map[string]interface{}{
+					"queryB": "resultB",
+				}, nil
+			}
+
+			assert.Fail(t, "unexpected operation name", ec.Plan.Operation.Name)
+			return nil, nil
+		},
+	)))
+	if err != nil {
+		t.Error(err.Error())
+		return
+	}
+
+	request := httptest.NewRequestWithContext(t.Context(), http.MethodPost, "/graphql", strings.NewReader(`[
+			{ 
+				"query": "query queryAOperation { queryA }", 
+				"variables": null 
+			},
+			{ 
+				"query": "query queryBOperation { queryB }", 
+				"variables": null 
+			}
+	]`))
+
+	// a recorder so we can check what the handler responded with
+	responseRecorder := httptest.NewRecorder()
+
+	// call the http hander
+	gateway.GraphQLHandler(responseRecorder, request)
+
+	// make sure we got correct order in response
+	response := responseRecorder.Result()
+	assert.Equal(t, http.StatusOK, response.StatusCode)
+
+	// read the body
+	body, err := io.ReadAll(response.Body)
+	assert.NoError(t, response.Body.Close())
+
+	if err != nil {
+		t.Error(err.Error())
+		return
+	}
+
+	result := []map[string]interface{}{}
+	err = json.Unmarshal(body, &result)
+	if err != nil {
+		t.Error(err.Error())
+		return
+	}
+
+	// we should have gotten 2 responses
+	if !assert.Len(t, result, 2) {
+		return
+	}
+
+	// make sure there were no errors in the first query
+	if firstQuery := result[0]; assert.Nil(t, firstQuery["errors"]) {
+		// make sure it has the right id
+		assert.Equal(t, map[string]interface{}{"queryA": "resultA"}, firstQuery["data"])
+	}
+
+	// make sure there were no errors in the second query
+	if secondQuery := result[1]; assert.Nil(t, secondQuery["errors"]) {
+		// make sure it has the right id
+		assert.Equal(t, map[string]interface{}{"queryB": "resultB"}, secondQuery["data"])
+	}
 }
 
 func TestGraphQLHandler_postFilesWithError(t *testing.T) {
+	t.Parallel()
 	schema, err := graphql.LoadSchema(`
 		scalar Upload
 
@@ -938,12 +1073,12 @@ func TestGraphQLHandler_postFilesWithError(t *testing.T) {
 			uploadMultiInput(input: FilesInput!): [String!]!
 		}
 	`)
+	assert.NoError(t, err)
 
 	// create gateway schema we can test against
 	gateway, err := New([]*graphql.RemoteSchema{
 		{Schema: schema, URL: "url-file-upload"},
 	})
-
 	if err != nil {
 		t.Error(err.Error())
 		return
@@ -1219,12 +1354,12 @@ func TestGraphQLHandler_postFilesWithError(t *testing.T) {
 		},
 	} {
 		t.Run(queryTest.mess, func(t *testing.T) {
+			t.Parallel()
 			request, err := createMultipartRequest(
 				[]byte(queryTest.operations),
 				[]byte(queryTest.fileMap),
 				queryTest.files...,
 			)
-
 			if err != nil {
 				t.Error(err)
 				return
@@ -1237,13 +1372,16 @@ func TestGraphQLHandler_postFilesWithError(t *testing.T) {
 			gateway.GraphQLHandler(responseRecorder, request)
 
 			// make sure we got an error code
-			assert.Equal(t, http.StatusUnprocessableEntity, responseRecorder.Result().StatusCode)
+			result := responseRecorder.Result()
+			assert.NoError(t, result.Body.Close())
+			assert.Equal(t, http.StatusUnprocessableEntity, result.StatusCode)
 		})
 	}
 
 	t.Run("Not multipart request", func(t *testing.T) {
+		t.Parallel()
 		// the incoming request
-		request := httptest.NewRequest("POST", "/graphql", strings.NewReader(`{ 
+		request := httptest.NewRequestWithContext(t.Context(), http.MethodPost, "/graphql", strings.NewReader(`{ 
 				"query": "mutation ($someFile: Upload!) { upload(file: $someFile) }", 
 				"variables": { "someFile": null } 
 			}`))
@@ -1256,12 +1394,15 @@ func TestGraphQLHandler_postFilesWithError(t *testing.T) {
 		gateway.GraphQLHandler(responseRecorder, request)
 
 		// make sure we got an error code
-		assert.Equal(t, http.StatusUnprocessableEntity, responseRecorder.Result().StatusCode)
+		result := responseRecorder.Result()
+		assert.NoError(t, result.Body.Close())
+		assert.Equal(t, http.StatusUnprocessableEntity, result.StatusCode)
 	})
 
 	t.Run("Unknown content-type", func(t *testing.T) {
+		t.Parallel()
 		// the incoming request
-		request := httptest.NewRequest("POST", "/graphql", strings.NewReader(`{ 
+		request := httptest.NewRequestWithContext(t.Context(), http.MethodPost, "/graphql", strings.NewReader(`{ 
 				"query": "mutation ($someFile: Upload!) { upload(file: $someFile) }", 
 				"variables": { "someFile": null } 
 			}`))
@@ -1274,12 +1415,14 @@ func TestGraphQLHandler_postFilesWithError(t *testing.T) {
 		gateway.GraphQLHandler(responseRecorder, request)
 
 		// make sure we got an error code
-		assert.Equal(t, http.StatusUnprocessableEntity, responseRecorder.Result().StatusCode)
+		result := responseRecorder.Result()
+		assert.NoError(t, result.Body.Close())
+		assert.Equal(t, http.StatusUnprocessableEntity, result.StatusCode)
 	})
 }
 
 func createMultipartRequest(operations, fileMap []byte, filesContent ...[]byte) (*http.Request, error) {
-	var b = bytes.Buffer{}
+	b := bytes.Buffer{}
 	var fw io.Writer
 	var err error
 
@@ -1323,8 +1466,94 @@ func createMultipartRequest(operations, fileMap []byte, filesContent ...[]byte) 
 	}
 
 	// the incoming request
-	request := httptest.NewRequest("POST", "/graphql", &b)
+	request := httptest.NewRequestWithContext(context.Background(), http.MethodPost, "/graphql", &b)
 	request.Header.Set("Content-Type", w.FormDataContentType())
 
 	return request, nil
+}
+
+func TestStaticPlaygroundHandler(t *testing.T) {
+	t.Parallel()
+	schema, err := graphql.LoadSchema(`
+		type Query {
+			allUsers: [String!]!
+		}
+	`)
+	assert.NoError(t, err)
+
+	// create gateway schema we can test against
+	gateway, err := New([]*graphql.RemoteSchema{
+		{Schema: schema, URL: "url1"},
+	}, WithExecutor(ExecutorFunc(
+		func(*ExecutionContext) (map[string]interface{}, error) {
+			return map[string]interface{}{
+				"Hello": "world",
+			}, nil
+		},
+	)))
+	if err != nil {
+		t.Error(err.Error())
+		return
+	}
+
+	t.Run("static UI", func(t *testing.T) {
+		t.Parallel()
+		request := httptest.NewRequestWithContext(t.Context(), http.MethodGet, "/graphql", strings.NewReader(""))
+		responseRecorder := httptest.NewRecorder()
+		gateway.StaticPlaygroundHandler(PlaygroundConfig{
+			Endpoint: "some-url",
+		}).ServeHTTP(responseRecorder, request)
+
+		result := responseRecorder.Result()
+		defer result.Body.Close()
+		assert.Equal(t, http.StatusOK, result.StatusCode)
+
+		assert.Contains(t, responseRecorder.Body.String(), "some-url")
+	})
+
+	t.Run("queries fail", func(t *testing.T) {
+		t.Parallel()
+		request := httptest.NewRequestWithContext(t.Context(), http.MethodPost, "/graphql", strings.NewReader(`query { allUsers { firstName } }`))
+		responseRecorder := httptest.NewRecorder()
+		gateway.StaticPlaygroundHandler(PlaygroundConfig{}).ServeHTTP(responseRecorder, request)
+
+		result := responseRecorder.Result()
+		assert.NoError(t, result.Body.Close())
+		assert.Equal(t, http.StatusMethodNotAllowed, result.StatusCode)
+	})
+}
+
+// Conforms to working draft spec for GraphQL over HTTP: https://github.com/graphql/graphql-over-http/blob/e4540976487b77bc04f1b2ce5cc48a9beea49381/spec/GraphQLOverHTTP.md?plain=1#L205-L206
+func TestGraphQLHandler_OptionsMethod(t *testing.T) {
+	t.Parallel()
+	planner := &MockErrPlanner{Err: errors.New("Planning error")}
+	schema, err := graphql.LoadSchema(`
+		type Query {
+			allUsers: [String!]!
+		}
+	`)
+	assert.NoError(t, err)
+	schemas := []*graphql.RemoteSchema{{Schema: schema, URL: "url1"}}
+	gateway, err := New(schemas, WithPlanner(planner))
+	if err != nil {
+		t.Error(err.Error())
+		return
+	}
+	request := httptest.NewRequestWithContext(t.Context(), http.MethodOptions, "/graphql", nil)
+	response := httptest.NewRecorder()
+
+	gateway.GraphQLHandler(response, request)
+	assert.Equal(t, http.StatusMethodNotAllowed, response.Code, "Unhandled HTTP method should return 405 Method Not Allowed, got:", response.Code)
+	assert.JSONEq(t, `
+{
+  "data": null,
+  "errors": [
+    {
+      "extensions": {
+        "code": "UNKNOWN_ERROR"
+      },
+      "message": "Method Not Allowed"
+    }
+  ]
+}`, response.Body.String())
 }

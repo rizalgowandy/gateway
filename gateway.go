@@ -2,6 +2,7 @@ package gateway
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"strings"
@@ -89,12 +90,9 @@ func (g *Gateway) Execute(ctx *RequestContext, plans QueryPlanList) (map[string]
 
 	// TODO: handle plans of more than one query
 	// execute the plan and return the results
-	result, err := g.executor.Execute(executionContext)
-	if err != nil {
-		if len(result) == 0 {
-			return nil, err
-		}
-		return result, err
+	result, executeErr := g.executor.Execute(executionContext)
+	if executeErr != nil && len(result) == 0 {
+		result = nil
 	}
 
 	// now that we have our response, throw it through the list of middlewarse
@@ -105,7 +103,7 @@ func (g *Gateway) Execute(ctx *RequestContext, plans QueryPlanList) (map[string]
 	}
 
 	// we're done here
-	return result, nil
+	return result, executeErr
 }
 
 func (g *Gateway) internalSchema() (*ast.Schema, error) {
@@ -120,16 +118,18 @@ func (g *Gateway) internalSchema() (*ast.Schema, error) {
 		}
 	`)
 	if schema == nil {
-		return nil, fmt.Errorf("Syntax error in schema string: %s", err.Error())
+		return nil, fmt.Errorf("syntax error in schema string: %w", err)
 	}
 
 	// then we have to add any query fields we have
 	for _, field := range g.queryFields {
-		schema.Query.Fields = append(schema.Query.Fields, &ast.FieldDefinition{
-			Name:      field.Name,
-			Type:      field.Type,
-			Arguments: field.Arguments,
-		})
+		if field.Name != "node" { // skip internal Query field name
+			schema.Query.Fields = append(schema.Query.Fields, &ast.FieldDefinition{
+				Name:      field.Name,
+				Type:      field.Type,
+				Arguments: field.Arguments,
+			})
+		}
 	}
 
 	// we're done
@@ -150,7 +150,7 @@ func New(sources []*graphql.RemoteSchema, configs ...Option) (*Gateway, error) {
 		executor:       &ParallelExecutor{},
 		logger:         &DefaultLogger{},
 		merger:         MergerFunc(mergeSchemas),
-		queryFields:    []*QueryField{nodeField},
+		queryFields:    []*QueryField{makeNodeField()},
 		queryPlanCache: &NoQueryPlanCache{},
 	}
 
@@ -186,7 +186,8 @@ func New(sources []*graphql.RemoteSchema, configs ...Option) (*Gateway, error) {
 			{
 				URL:    internalSchemaLocation,
 				Schema: internal,
-			}},
+			},
+		},
 			false,
 		),
 	)
@@ -298,19 +299,33 @@ func WithLogger(l Logger) Option {
 	}
 }
 
-var nodeField = &QueryField{
-	Name: "node",
-	Type: ast.NamedType("Node", &ast.Position{}),
-	Arguments: ast.ArgumentDefinitionList{
-		&ast.ArgumentDefinition{
-			Name: "id",
-			Type: ast.NonNullNamedType("ID", &ast.Position{}),
+func makeNodeField() *QueryField {
+	return &QueryField{
+		Name: "node",
+		Type: ast.NamedType("Node", &ast.Position{}),
+		Arguments: ast.ArgumentDefinitionList{
+			&ast.ArgumentDefinition{
+				Name: "id",
+				Type: ast.NonNullNamedType("ID", &ast.Position{}),
+			},
 		},
-	},
-	Resolver: func(ctx context.Context, args map[string]interface{}) (string, error) {
-		// pass it to the user
-		return args["id"].(string), nil
-	},
+		NotAuthoritative: true,
+		Resolver: func(_ context.Context, args map[string]interface{}) (string, error) {
+			id := args["id"]
+			if id == nil {
+				return "", fmt.Errorf("argument 'id' is required")
+			}
+			idStr, ok := id.(string)
+			if !ok {
+				jsonID, err := json.Marshal(id)
+				if err != nil {
+					return "", fmt.Errorf("invalid ID type")
+				}
+				return "", fmt.Errorf("invalid ID type: %s", string(jsonID))
+			}
+			return idStr, nil
+		},
+	}
 }
 
 func fieldURLs(schemas []*graphql.RemoteSchema, stripInternal bool) FieldURLMap {
@@ -321,7 +336,6 @@ func fieldURLs(schemas []*graphql.RemoteSchema, stripInternal bool) FieldURLMap 
 	for _, remoteSchema := range schemas {
 		// each type defined by the schema can be found at remoteSchema.URL
 		for name, typeDef := range remoteSchema.Schema.Types {
-
 			// if the type is part of the introspection (and can't be left up to the backing services)
 			if !strings.HasPrefix(typeDef.Name, "__") || !stripInternal {
 				// you can ask for __typename at any service that defines the type
@@ -329,18 +343,13 @@ func fieldURLs(schemas []*graphql.RemoteSchema, stripInternal bool) FieldURLMap 
 
 				// each field of each type can be found here
 				for _, fieldDef := range typeDef.Fields {
-
 					// if the field is not an introspection field
-					if !(name == "Query" && strings.HasPrefix(fieldDef.Name, "__")) {
+					if name != typeNameQuery || !strings.HasPrefix(fieldDef.Name, "__") {
 						locations.RegisterURL(name, fieldDef.Name, remoteSchema.URL)
-					} else {
-						// its an introspection name
-						if !stripInternal {
-							// register the location for the field
-							locations.RegisterURL(name, fieldDef.Name, remoteSchema.URL)
-						}
+					} else if !stripInternal { // its an introspection name
+						// register the location for the field
+						locations.RegisterURL(name, fieldDef.Name, remoteSchema.URL)
 					}
-
 				}
 			}
 		}
@@ -363,7 +372,7 @@ func (m FieldURLMap) URLFor(parent string, field string) ([]string, error) {
 
 	// if it doesn't exist
 	if !exists {
-		return []string{}, fmt.Errorf("Could not find location for %s", key)
+		return []string{}, fmt.Errorf("could not find location for %s", key)
 	}
 
 	// return the value to the caller
